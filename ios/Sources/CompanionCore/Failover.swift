@@ -313,11 +313,11 @@ extension Connection {
     /// either walks that complete typed set or, for an older desktop, derives
     /// direct routes from the legacy fields — never a lossy mixture of both.
     ///
-    /// A protected route that already carried the bearer leads regardless of
-    /// a lower advertised priority. Otherwise a hand-typed LAN origin
-    /// (`priority: 0`) would win the sort after restart and the rotation
-    /// would hand the token to cleartext again. Typing a local address
-    /// resets `activeEndpoint`, so the priority order remains the escape hatch.
+    /// When the active route already protected the bearer, all protected
+    /// routes lead while retaining their advertised priority. Otherwise a
+    /// hand-typed LAN origin (`priority: 0`) could win after restart and the
+    /// rotation would hand the token to cleartext again. Typing a local
+    /// address resets `activeEndpoint`, so priority remains the escape hatch.
     public var orderedEndpoints: [CompanionEndpoint] {
         var candidates = endpoints ?? []
         if !candidates.isEmpty {
@@ -329,8 +329,9 @@ extension Connection {
                     ? $0.offset < $1.offset
                     : $0.element.priority < $1.element.priority
             }.map(\.element)
-            if let activeEndpoint, activeEndpoint.protectsCredentials {
-                candidates = [activeEndpoint] + candidates.filter { $0.url != activeEndpoint.url }
+            if activeEndpoint?.protectsCredentials == true {
+                candidates = candidates.filter(\.protectsCredentials)
+                    + candidates.filter { !$0.protectsCredentials }
             }
         } else {
             candidates = orderedHosts.enumerated().compactMap { offset, candidate in
