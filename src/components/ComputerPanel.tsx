@@ -1025,7 +1025,7 @@ export function ComputerPanel({
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3">
         <button
-          onClick={() => dispatch({ type: "toggleSettings", open: true })}
+          onClick={() => dispatch({ type: "toggleSettings", open: true, section: "access" })}
           className="rounded-md p-1 text-ink-secondary hover:bg-control hover:text-ink"
           title="Bot settings"
         >

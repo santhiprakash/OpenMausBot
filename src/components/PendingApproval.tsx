@@ -37,6 +37,10 @@ export function isSkillApproval(pending: Pending): boolean {
   return Boolean(pending.message.card?.skillRequest);
 }
 
+export function isProfileApproval(pending: Pending): boolean {
+  return Boolean(pending.message.card?.profileRequest);
+}
+
 /** Open approvals on a thread, oldest first — answered/dismissed drop out. */
 export function pendingApprovals(messages: Message[]): Pending[] {
   return messages
@@ -57,10 +61,18 @@ export function pendingApprovals(messages: Message[]): Pending[] {
 export function spokenApprovalPrompt(pending: Pending, requester: string): string {
   const isRoutineRequest = isRoutineApproval(pending);
   const isSkillRequest = isSkillApproval(pending);
+  const isProfileRequest = isProfileApproval(pending);
   if (isSkillRequest) {
     const updating = pending.message.card?.skillRequest?.action === "update";
     const title = pending.message.card?.title.trim() || (updating ? "Update this skill?" : "Enable this skill?");
     return `${requester} asks: ${title}${/[.!?]$/.test(title) ? "" : "."} Review the skill on screen. Should I ${updating ? "update" : "enable"} it?`;
+  }
+  if (isProfileRequest) {
+    // pending.detail is the full subtitle — the whole diff for a soul
+    // change. Speak the card's concise title instead, the same way the
+    // routine/skill branches do, and let the user read the diff on screen.
+    const title = pending.message.card?.title.trim() || "Update this profile?";
+    return `${requester} wants to update its profile: ${title}. Review the change on screen. Should I confirm it?`;
   }
   if (!isRoutineRequest) {
     return `${requester} wants to ${pending.tool}. ${pending.detail}. Should I allow it?`;
@@ -74,6 +86,9 @@ function label(pending: Pending): string {
     return pending.message.card?.skillRequest?.action === "update"
       ? "Update this learned skill"
       : "Enable this learned skill";
+  }
+  if (isProfileApproval(pending)) {
+    return "Confirm this profile change";
   }
   if (isRoutineApproval(pending)) {
     return pending.message.card?.routineRequest?.operation.action === "create"
@@ -103,7 +118,15 @@ export const PendingApprovalPanel = memo(function PendingApprovalPanel({
   return (
     <div
       role="region"
-      aria-label={isSkillApproval(pending) ? "Pending skill confirmation" : isRoutineApproval(pending) ? "Pending routine confirmation" : "Pending approval"}
+      aria-label={
+        isSkillApproval(pending)
+          ? "Pending skill confirmation"
+          : isRoutineApproval(pending)
+            ? "Pending routine confirmation"
+            : isProfileApproval(pending)
+              ? "Pending profile confirmation"
+              : "Pending approval"
+      }
       className="rounded-t-2xl border-b border-hairline/50 bg-control/40 px-4 py-3"
     >
       <div className="flex flex-wrap items-center gap-2" aria-live="polite">
@@ -121,13 +144,23 @@ export const PendingApprovalPanel = memo(function PendingApprovalPanel({
             ? pending.message.card?.routineRequest?.operation.action === "create"
               ? "schedule_routine"
               : "manage_routine"
-            : pending.tool}
+            : isProfileApproval(pending)
+              ? "update_profile"
+              : pending.tool}
         </span>
       </div>
       {/* never truncated — long commands wrap and scroll */}
       <pre
         tabIndex={0}
-        aria-label={isSkillApproval(pending) ? "Skill details to review" : isRoutineApproval(pending) ? "Routine details to review" : "Approval details to review"}
+        aria-label={
+          isSkillApproval(pending)
+            ? "Skill details to review"
+            : isRoutineApproval(pending)
+              ? "Routine details to review"
+              : isProfileApproval(pending)
+                ? "Profile change to review"
+                : "Approval details to review"
+        }
         className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-ink"
       >
         {pending.detail}
@@ -155,7 +188,8 @@ export function PendingApprovalActions({
   const { dispatch } = useStore();
   const isRoutineRequest = isRoutineApproval(pending);
   const isSkillRequest = isSkillApproval(pending);
-  const durableRequest = isRoutineRequest || isSkillRequest;
+  const isProfileRequest = isProfileApproval(pending);
+  const durableRequest = isRoutineRequest || isSkillRequest || isProfileRequest;
   const reviewedSha256 = pending.message.card?.skillRequest
     ? reviewedSkillSha256(pending.message.card.skillRequest)
     : undefined;
@@ -182,7 +216,7 @@ export function PendingApprovalActions({
         onClick={() => decide("deny")}
         className={cn(base, "border border-danger/40 text-danger hover:bg-danger/10")}
       >
-        {isRoutineRequest ? "Cancel" : "Deny"}
+        {isRoutineRequest || isProfileRequest ? "Cancel" : "Deny"}
       </button>
       {!durableRequest && bot && pending.allowKey && (
         <button
@@ -203,7 +237,7 @@ export function PendingApprovalActions({
       >
         {isSkillRequest
           ? pending.message.card?.skillRequest?.action === "update" ? "Update" : "Enable"
-          : isRoutineRequest ? "Confirm" : "Allow once"}
+          : isRoutineRequest || isProfileRequest ? "Confirm" : "Allow once"}
       </button>
     </div>
   );
