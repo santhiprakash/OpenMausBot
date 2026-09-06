@@ -770,13 +770,14 @@ export interface DockerHardeningConfig {
 /** One hardening contract for both managed containers (Local VM here, the
  * BYO-VPS backend in vps-computer.ts): exact resource limits, no privilege,
  * no host namespaces or devices, no disabled security profiles. The only
- * knob the callers legitimately disagree on is the restart policy — the VPS
+ * runtime-specific capability exception is Podman's Firefox sandbox chroot.
+ * Callers also differ on restart policy — the VPS
  * container must survive a reboot nobody is watching ("unless-stopped"),
  * while the Local VM must NOT auto-resume: its desktop leaves a stale X lock
  * on stop, so a restarted container is a broken one. */
 export function dockerSecurityIsHardened(
   config: DockerHardeningConfig | undefined,
-  options: { restartPolicy?: "no" | "unless-stopped" } = {},
+  options: { restartPolicy?: "no" | "unless-stopped"; podmanBrowserSandbox?: boolean } = {},
 ): boolean {
   if (!config) return false;
   const capDrop = (config.CapDrop ?? []).map((cap) => cap.toLowerCase());
@@ -795,7 +796,7 @@ export function dockerSecurityIsHardened(
     (config.NanoCpus ?? 0) === NANO_CPUS &&
     config.PidsLimit === PIDS_LIMIT &&
     capDrop.includes("all") &&
-    capAdd.join(",") === "setgid,setuid" &&
+    capAdd.join(",") === (options.podmanBrowserSandbox ? "setgid,setuid,sys_chroot" : "setgid,setuid") &&
     config.Privileged === false &&
     !config.PidMode &&
     config.IpcMode === "private" &&
@@ -815,7 +816,7 @@ export function dockerSecurityIsHardened(
 /** Podman normalizes HostConfig capability and namespace fields when it
  * serializes inspect output. Validate its authoritative effective/bounding
  * sets, then normalize only those known representation differences through
- * the unchanged Docker hardening contract. */
+ * the shared hardening contract with the Podman-only chroot exception. */
 export function podmanSecurityIsHardened(
   config: DockerHardeningConfig | undefined,
   effectiveCaps: string[] | undefined,
@@ -825,7 +826,7 @@ export function podmanSecurityIsHardened(
   const normalizeCaps = (caps: string[] | undefined) => (caps ?? [])
     .map((cap) => cap.toLowerCase().replace(/^cap_/, ""))
     .sort();
-  const exactCaps = "setgid,setuid";
+  const exactCaps = "setgid,setuid,sys_chroot";
   if (normalizeCaps(effectiveCaps).join(",") !== exactCaps) return false;
   if (normalizeCaps(boundingCaps).join(",") !== exactCaps) return false;
   return dockerSecurityIsHardened({
@@ -839,7 +840,7 @@ export function podmanSecurityIsHardened(
     UsernsMode: config.UsernsMode === "private" || config.UsernsMode === "keep-id:uid=1000,gid=1000"
       ? "" : config.UsernsMode,
     CgroupnsMode: config.CgroupnsMode || "private",
-  });
+  }, { podmanBrowserSandbox: true });
 }
 
 export function containerRunArgs(
@@ -916,6 +917,9 @@ export function containerRunArgs(
       "512m",
     );
   }
+  // Podman's default seccomp profile gates chroot on this capability.
+  // Firefox uses chroot inside its own namespace to establish its sandbox.
+  if (runtime === "podman") common.push("--cap-add", "SYS_CHROOT");
   common.push(
     "--mount",
     runtime === "podman"
