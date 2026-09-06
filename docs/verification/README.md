@@ -53,6 +53,9 @@ instructions, history restore, skill/memory refresh, and stale-response isolatio
 
 ## Evidence
 
+The [Japanese desktop font recipe](japanese-desktop.md) checks real Firefox and
+XFCE glyph rendering in disposable managed desktops, including fresh recreation.
+
 The optional [Podman full-stack acceptance recipe](podman-self-hosting.md)
 checks the Compose deployment with a fresh home, fake engine, and two desktops.
 It includes workspace ownership, persistence, and proxy authentication checks.
