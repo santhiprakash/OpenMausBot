@@ -10,10 +10,11 @@ import { recordEvents, type EventRecorder } from "../testing/events.ts";
 import { removeTempDir } from "../testing/cleanup.ts";
 import {
   ANTIGRAVITY_AUTH_PREFIX,
-  authorizationUrlFromLine,
+  AntigravityAcpClient,
   AntigravityAuthController,
-  antigravityProfileDirectory,
   antigravityProfileAuthenticated,
+  antigravityProfileDirectory,
+  authorizationUrlFromLine,
   catalogFromAntigravityConfigOptions,
   isValidAntigravityInitializeResult,
   parseAntigravityAuthorizationUrl,
@@ -132,6 +133,21 @@ createInterface({ input: process.stdin }).on('line', line => {
     } finally {
       controller.cancel();
     }
+  });
+});
+
+describe("stopping the runtime before touching its files", () => {
+  it("closeAndWait resolves only once the process is gone, so a rename on Windows cannot hit a running executable", async () => {
+    const fake = fakeRuntime();
+    const runtime = await resolveAntigravityRuntime(fake.executable);
+    const profile = await prepareAntigravityProfile({ instanceId: "close-and-wait", runtime, baseDir: fake.directory });
+    const client = new AntigravityAcpClient(runtime, profile, fake.directory);
+    await client.initialize();
+    expect(client.child.exitCode).toBeNull();
+    expect(await client.closeAndWait()).toBe(true);
+    expect(client.child.exitCode !== null || client.child.signalCode !== null).toBe(true);
+    // idempotent, and immediate the second time
+    expect(await client.closeAndWait(100)).toBe(true);
   });
 });
 

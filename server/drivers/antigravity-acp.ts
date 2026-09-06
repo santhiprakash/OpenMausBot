@@ -159,6 +159,10 @@ export class AntigravityAcpClient {
   private diagnosticBuffer = "";
   private closed = false;
   private readonly onAuthorizationUrl?: (url: string) => void;
+  /** Settles once the runtime process is gone. On Windows a running
+   * executable pins its file and its directory, so an installer must not
+   * rename or delete either until this settles. */
+  readonly exited: Promise<void>;
 
   constructor(
     runtime: AntigravityRuntime,
@@ -180,8 +184,13 @@ export class AntigravityAcpClient {
     this.child.stderr!.setEncoding("utf8");
     this.child.stderr!.on("data", (chunk: string) => this.consumeDiagnostics(chunk));
     this.child.once("error", (error) => this.failAll(error));
-    this.child.once("close", (code) => {
-      if (!this.closed) this.failAll(new Error(`Antigravity ACP exited ${code ?? "unexpectedly"}.`));
+    this.exited = new Promise((resolve) => {
+      this.child.once("close", (code) => {
+        if (!this.closed) this.failAll(new Error(`Antigravity ACP exited ${code ?? "unexpectedly"}.`));
+        resolve();
+      });
+      // A spawn failure emits `error` and then `close`, but not always `exit`.
+      this.child.once("error", () => resolve());
     });
   }
 
@@ -273,6 +282,22 @@ export class AntigravityAcpClient {
     this.closed = true;
     this.failAll(new Error("Antigravity ACP was closed."));
     killCliTree(this.child);
+  }
+
+  /** Close, then wait (bounded) for the process to be gone. `killCliTree`
+   * on Windows asks taskkill and returns at once; the exit lands later. */
+  async closeAndWait(timeoutMs = 5_000): Promise<boolean> {
+    this.close();
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([this.exited.then(() => true), timedOut]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 
@@ -472,7 +497,9 @@ export async function validateAntigravityRuntime(runtime: AntigravityRuntime, ex
         throw new Error("The download did not identify as the expected Google Antigravity ACP release.");
       }
     } finally {
-      client.close();
+      // The caller is about to rename the directory this executable runs
+      // from; on Windows that fails with EPERM while the process lives.
+      await client.closeAndWait();
     }
   } finally {
     await rm(profileDirectory, { recursive: true, force: true });
