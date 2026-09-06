@@ -643,6 +643,16 @@ describe("Cua integration", () => {
     expect(dockerfile).not.toContain("while ! DISPLAY=:1 xset q");
   });
 
+  it("installs checksum-pinned Japanese fonts and their license before the desktop starts", () => {
+    const dockerfile = managedImageDockerfile();
+    expect(dockerfile).toContain("NotoSansCJKjp-Regular.otf");
+    expect(dockerfile).toContain("68a3fc98800b2a27b371f2fb79991daf3633bd89309d4ffaa6946fd587f375b5");
+    expect(dockerfile).toContain("6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2");
+    expect(dockerfile).toContain("/usr/local/share/licenses/noto-cjk/OFL.txt");
+    expect(dockerfile).toContain("fc-cache -f");
+    expect(IMAGE_LAYER_VERSION).toBe("5");
+  });
+
   it("rejects a zero-byte OpenSSL base image before the wheel download needs curl", () => {
     const dockerfile = managedImageDockerfile();
     // both multiarch triplets, both OpenSSL libraries
