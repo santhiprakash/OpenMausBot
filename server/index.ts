@@ -85,6 +85,7 @@ import { openMausStatusSystemPrompt } from "./openmaus-status-capsule.ts";
 import {
   containerComputerAction,
   containerComputerExists,
+  containerComputerFrame,
   containerComputerMcp,
   containerComputerScreenshot,
   containerComputerStatus,
@@ -4225,6 +4226,23 @@ async function startTurn(
           localVmTarget,
         );
         computerKind = "vm";
+        // Same contract as the Box and VPS branches below: without this the
+        // poller never starts, so the Local VM publishes no `screen` events
+        // and every client that only has the stream (the phone) waits
+        // forever. The web panel hid the gap by polling the screenshot
+        // route itself.
+        previewCapture = () => {
+          // The shared desktop outlives the turn. Once another thread owns
+          // it, a capture still in flight would picture ITS work under this
+          // bot's name — live and in the settled transcript frame, which is
+          // taken after the lease is already released. No owner means the
+          // desktop is simply idle: that final frame is ours to keep.
+          const owner = localVmLeaseFor(localVmTarget).current(localVmOwnerBusy);
+          if (owner && owner.threadId !== threadId) {
+            throw new Error("the Local VM moved on to another turn");
+          }
+          return containerComputerFrame(undefined, undefined, localVmTarget);
+        };
       } else if (wants === "local") {
         if (!shouldMountLocalComputer({
           requested: "local",
