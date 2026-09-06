@@ -100,6 +100,16 @@ describe("control-omb command mapping", () => {
 });
 
 describe("control-omb isolated verification loop", () => {
+  it.each([
+    "tcp://127.0.0.1:2375",
+    "ssh://user@production.example/run/podman.sock",
+    "ssh://user:secret@127.0.0.1/run/podman.sock",
+  ])("rejects an unsafe live VM fixture endpoint: %s", async (host) => {
+    await expect(launchVerificationServer({}, undefined, {
+      binDir: "/fixture/bin", host, sshKey: "/fixture/key", staticDir: "/fixture/dist",
+    })).rejects.toThrow("explicit loopback Podman machine");
+  });
+
   it("launches, drives a real fake-engine turn, and removes only its test data", async () => {
     const session = await launchVerificationServer({
       ...process.env,

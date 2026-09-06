@@ -260,7 +260,14 @@ export interface VerificationServer {
 export async function launchVerificationServer(
   parentEnv: NodeJS.ProcessEnv = process.env,
   signal?: AbortSignal,
+  localVm?: { binDir: string; host: string; sshKey: string; staticDir: string },
 ): Promise<VerificationServer> {
+  if (localVm) {
+    const endpoint = new URL(localVm.host);
+    if (endpoint.protocol !== "ssh:" || endpoint.hostname !== "127.0.0.1" || endpoint.password) {
+      throw new ControlOmbError("Local VM verification requires an explicit loopback Podman machine");
+    }
+  }
   const port = await freePortBlock([0, 1]);
   if (signal?.aborted) throw new ControlOmbError("verification launch cancelled");
   const url = `http://127.0.0.1:${port}`;
@@ -309,6 +316,14 @@ export async function launchVerificationServer(
     // fake CLI's `#!/usr/bin/env node` shebang. Windows resolves that same
     // fixture through spawnCli without a shell.
     PATH: dirname(process.execPath),
+  });
+  // Opt-in live Local VM fixture: keep the temporary home and fake engine,
+  // granting only the explicitly selected machine connection and static UI.
+  if (localVm) Object.assign(childEnv, {
+    OMB_EXTRA_PATH: [localVm.binDir, join(childEnv.SYSTEMROOT || "C:\\Windows", "System32")].join(process.platform === "win32" ? ";" : ":"),
+    CONTAINER_HOST: localVm.host,
+    CONTAINER_SSHKEY: localVm.sshKey,
+    OMB_STATIC_DIR: localVm.staticDir,
   });
   const child = spawn(process.execPath, ["--experimental-strip-types", join(ROOT, "server", "index.ts")], {
     cwd: ROOT,

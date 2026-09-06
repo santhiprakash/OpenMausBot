@@ -5335,6 +5335,8 @@ async function runGroupMemberTurn(
     return true;
   }
   const internalGeneration = beginInternalCapabilityGeneration(threadId);
+  let roomVmTarget: ReturnType<typeof localVmTargetForBot> | null = null;
+  let retainRoomVmLease = false;
   try {
   const integrations: NonNullable<Parameters<typeof instance.adapter.sendTurn>[0]["integrations"]> = {};
   const skillAuthoring =
@@ -5549,6 +5551,35 @@ async function runGroupMemberTurn(
   store.patchGroup(readyGroup.id, { busyBotId: bot.id }); // the store's change stream carries the frame
   groupSpeakers.set(threadId, { botId: bot.id, name: bot.name, color: bot.color });
 
+  // Room and Goal turns use the speaker's desktop, never the coordinator's.
+  // Claim the same lease as direct turns before asynchronous VM setup.
+  if (readyBot.computer === "vm") {
+    if (instance.adapter.capabilities.computerMcp !== true || instance.driverKind === "boxAgent") {
+      throw new Error("this model engine cannot use the Local VM");
+    }
+    const target = localVmTargetForBot(readyBot.id);
+    if (localVmImageBusy || localVmModeChangeBusy || localVmLifecycleBusy.has(target.key)) {
+      throw new Error("this Local VM is being started, stopped, or replaced");
+    }
+    if (!localVmLeaseFor(target).claim(threadId, readyBot.id, localVmOwnerBusy)) {
+      throw new Error("this Local VM is already being used by another turn");
+    }
+    roomVmTarget = target;
+    localVmThreadTargets.set(threadId, target);
+    localVmActiveThreads.set(target.key, threadId);
+    localVmIdleFor(target).touch();
+    const vm = await readyLocalVmForTurn(readyBot.id, target);
+    if (isCancelled?.() || !store.bot(readyBot.id)?.busy || store.group(readyGroup.id)?.busyBotId !== readyBot.id) {
+      return false;
+    }
+    if (!vm.ready || !vm.runtime) throw new Error(vm.problem ?? "the Local VM is not ready");
+    integrations.localComputer = containerComputerMcp(
+      vm.runtime,
+      controlIntegration(readyBot.id, threadId, internalGeneration),
+      target,
+    );
+  }
+
   const roster = readyGroup.memberIds
     .map((id) => store.bot(id))
     .filter((b): b is NonNullable<typeof b> => Boolean(b))
@@ -5601,6 +5632,7 @@ async function runGroupMemberTurn(
     if (drift.drift !== Boolean(bot.soulDrift)) store.patchBot(bot.id, { soulDrift: drift.drift });
   }
   const roomSystem = buildSystemPrompt(system, store.bot(bot.id)?.soul ?? bot.soul ?? "", [
+    { id: "computer", label: "Computer", text: computerPrompt(roomVmTarget ? localVmMode(cfg) === "per-bot" ? "vm-private" : "vm-shared" : null) },
     { id: "browser", label: "Browser", text: integrations.browser ? BUILT_IN_BROWSER_SYSTEM_PROMPT : "" },
     { id: "recall", label: "Recall", text: integrations.agents ? SESSION_SEARCH_SYSTEM_PROMPT : "" },
     { id: "section-context", label: "Section context", text: sectionContextSystemPrompt(bot.section) },
@@ -5753,6 +5785,10 @@ async function runGroupMemberTurn(
   // work so a retained proxy from this member cannot act during the next
   // member's generation.
   revokeInternalCapabilityGeneration(threadId, internalGeneration);
+  retainRoomVmLease = outcome === "timed_out" || outcome === "stalled";
+  if (!retainRoomVmLease && roomVmTarget && localVmThreadTargets.get(threadId) === roomVmTarget) {
+    releaseLocalVmThread(threadId);
+  }
   if (orchestration) {
     orchestration.result.replyText = replyText.trim();
     orchestration.result.outcome = outcome;
@@ -5904,6 +5940,9 @@ async function runGroupMemberTurn(
     // Covers connector/setup failures, cancellation before dispatch, and all
     // other early returns that never produce a provider terminal event.
     revokeInternalCapabilityGeneration(threadId, internalGeneration);
+    if (!retainRoomVmLease && roomVmTarget && localVmThreadTargets.get(threadId) === roomVmTarget) {
+      releaseLocalVmThread(threadId);
+    }
   }
 }
 
