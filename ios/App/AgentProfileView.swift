@@ -546,7 +546,7 @@ private struct ProfileFormSnapshot {
 }
 
 private extension AvatarCrop {
-    var label: String {
+    var label: LocalizedStringKey {
         switch self {
         case .mascot: "Mascot"
         case .circle: "Circle"
