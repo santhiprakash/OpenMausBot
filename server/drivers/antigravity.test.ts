@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -9,6 +9,8 @@ import type { ProviderInstance } from "../contracts.ts";
 import { recordEvents, type EventRecorder } from "../testing/events.ts";
 import { removeTempDir } from "../testing/cleanup.ts";
 import * as procs from "../procs.ts";
+import * as envPath from "../env-path.ts";
+import * as managedRuntime from "./antigravity-runtime.ts";
 import {
   ANTIGRAVITY_AUTH_PREFIX,
   AntigravityAcpClient,
@@ -108,6 +110,70 @@ describe("official Antigravity catalog", () => {
 });
 
 describe("Antigravity sign-in lifecycle", () => {
+  it("preserves failed setup errors until retry or external recovery, without reviving stale errors", async () => {
+    if (!resolveAntigravityReleaseAsset()) return;
+    const fake = fakeRuntime();
+    const custom = join(fake.directory, "not-installed");
+    const install = vi.spyOn(managedRuntime, "installAntigravityRuntime")
+      .mockRejectedValueOnce(new Error("Antigravity initialization timed out: fixture failure"));
+    const instance = await AntigravityDriver.create({
+      instanceId: "failed-antigravity-install",
+      displayName: "Antigravity fixture", enabled: true,
+      config: { cli: custom, fullAuto: false },
+      environment: {},
+    });
+    try {
+      await expect(instance.installRuntime!()).rejects.toThrow("fixture failure");
+      expect(await instance.snapshot()).toEqual({ state: "unavailable", reason: "Antigravity initialization timed out: fixture failure" });
+      // Independent refreshes (including reopening the card) keep the cause.
+      expect((await instance.snapshot()).reason).toContain("fixture failure");
+      // A manual/shared install can recover without this instance retrying.
+      copyFileSync(fake.executable, custom);
+      if (process.platform !== "win32") chmodSync(custom, 0o755);
+      expect((await instance.snapshot()).state).toBe("available");
+      unlinkSync(custom);
+      const unavailable = await instance.snapshot();
+      expect(unavailable.state).toBe("unavailable");
+      expect(unavailable.reason).not.toContain("fixture failure");
+      install.mockRejectedValueOnce(new Error("Antigravity initialization timed out: fixture failure"));
+      await expect(instance.installRuntime!()).rejects.toThrow("fixture failure");
+      install.mockResolvedValueOnce({ executablePath: fake.executable, harnessPath: fake.harness, source: "managed", version: "1.1.1" });
+      await instance.installRuntime!();
+      expect((await instance.snapshot()).reason).not.toContain("fixture failure");
+    } finally {
+      await instance.dispose();
+    }
+  });
+
+  it("uses the same discovered PATH for readiness and Google sign-in", async () => {
+    const fake = fakeRuntime();
+    const executable = join(fake.directory, process.platform === "win32" ? "agy_acp_server.exe" : "agy_acp_server.par");
+    copyFileSync(fake.executable, executable);
+    if (process.platform !== "win32") chmodSync(executable, 0o755);
+    vi.stubEnv("PATH", "");
+    vi.spyOn(envPath, "augmentedPath").mockReturnValue(fake.directory);
+    const authenticate = vi.spyOn(AntigravityAuthController.prototype, "start").mockResolvedValue({
+      phase: "succeeded", flowId: null, authorizationUrl: null, expiresAt: null,
+    });
+    const instance = await AntigravityDriver.create({
+      instanceId: "path-only-antigravity",
+      displayName: "Antigravity fixture",
+      enabled: true,
+      config: { cli: "agy_acp_server" + (process.platform === "win32" ? ".exe" : ".par"), fullAuto: false },
+      environment: { PATH: "" },
+    });
+    try {
+      expect((await instance.snapshot()).state).toBe("available");
+      await expect(instance.startAuthentication!()).resolves.toMatchObject({ phase: "succeeded" });
+      expect(authenticate).toHaveBeenCalledWith(
+        expect.objectContaining({ executablePath: executable }),
+        expect.objectContaining({ environment: expect.objectContaining({ PATH: fake.directory }) }),
+      );
+    } finally {
+      await instance.dispose();
+    }
+  });
+
   // Google's server announces the link on stderr, never stdout — a fake that
   // prints to stdout passes against code that cannot sign in at all.
   it.each(["cancel", "provider failure"])("contains %s after handing the browser a sign-in URL", async (ending) => {

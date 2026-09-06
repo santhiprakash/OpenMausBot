@@ -69,7 +69,79 @@ afterEach(() => {
   for (const directory of scratch.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
+describe("Antigravity initialization diagnostics", () => {
+  it("reports a timeout separately from a missing executable without exposing stderr", async () => {
+    const child = fakeChild(null);
+    const acp = client();
+    const result = acp.initialize(100).catch((error: Error) => error);
+    child.stderr.write("private auth code: do-not-disclose\n");
+    child.stderr.write("https://accounts.google.com/o/oauth2/v2/auth?state=private-state&code=secret-code\n");
+    child.stderr.write("Failed to extract Python bundle into a private path");
+    await vi.advanceTimersByTimeAsync(100);
+    const error = await result;
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain("executable was found");
+    expect(error.message).toContain(`${process.platform}-${process.arch}`);
+    expect(error.message).toContain("unpacking or loading its bundled Python runtime");
+    expect(error.message).toContain("Startup output: 0 bytes");
+    for (const secret of ["do-not-disclose", "accounts.google.com", "private-state", "secret-code", "private path"]) {
+      expect(error.message).not.toContain(secret);
+    }
+    acp.close();
+  });
+
+  it("keeps the existing 90-second cold-start allowance", async () => {
+    const child = fakeChild(null);
+    const acp = client();
+    const result = acp.initialize();
+    let settled = false;
+    void result.then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(89_000);
+    expect(settled).toBe(false);
+    child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: initialized })}\n`);
+    await expect(result).resolves.toEqual(initialized);
+    acp.close();
+  });
+
+  it("retains a fixed disk-space hint when the native process exits without a newline", async () => {
+    const child = fakeChild(null);
+    const acp = client();
+    const rejected = expect(acp.initialize()).rejects.toThrow("insufficient disk space");
+    child.stderr.write("No space left on device: user-private-directory");
+    child.emit("close", 1);
+    await rejected;
+    acp.close();
+  });
+
+  it("does not reuse a startup warning after initialization succeeds", async () => {
+    const child = fakeChild(null);
+    const acp = client();
+    child.stderr.write("permission denied during optional startup check\n");
+    const result = acp.initialize();
+    child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: initialized })}\n`);
+    await result;
+    const pending = acp.request("authenticate", {});
+    const rejected = expect(pending).rejects.toThrow(/^Antigravity ACP exited 1\.$/u);
+    child.emit("close", 1);
+    await rejected;
+    acp.close();
+  });
+});
+
 describe("Antigravity validation shutdown", () => {
+  it("contains Windows one-file extraction in the owned verification profile", async () => {
+    const child = fakeChild();
+    vi.mocked(killCliTree).mockImplementation(() => { child.emit("close", 0); });
+    await validateAntigravityRuntime(runtime, "1.1.1");
+    const environment = vi.mocked(spawnCli).mock.calls[0][2].env!;
+    if (process.platform === "win32") {
+      expect(environment.TEMP).toBe(scratch[0]);
+      expect(environment.TMP).toBe(scratch[0]);
+    }
+    expect(environment.GEMINI_HOME).toBe(scratch[0]);
+    expect(existsSync(scratch[0])).toBe(false);
+  });
+
   it.each(["kill EPERM", "spawn ENOENT"])("does not treat %s as close", async (message) => {
     const child = fakeChild(null);
     const acp = client();
