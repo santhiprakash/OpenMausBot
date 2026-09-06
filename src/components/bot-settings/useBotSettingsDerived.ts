@@ -4,7 +4,7 @@
 // stay pure prop-takers. This hook is the one place in the bot settings
 // dialog that still reaches into useStore.
 import { useDesktopCapabilities } from "../DesktopCapabilities";
-import { builtInBrowserEnabled } from "@/lib/feature-flags";
+import { browserAvailable, browserUnavailableReason, builtInBrowserEnabled } from "@/lib/feature-flags";
 import { instanceSupportsLocalComputer, localComputerDisabledReason, localComputerSelectable } from "@/lib/local-computer";
 import { stateForBot } from "@/lib/mascot";
 import { useStore, type Bot } from "@/state/store";
@@ -62,7 +62,7 @@ export function useBotSettingsDerived(bot: Bot) {
   const connectedAppsConfigured = state.config?.composio?.configured === true;
   const connectedAppsEnabled = bot.composio !== false;
   const canUseBrowser = engine?.capabilities?.browserMcp === true;
-  const desktopBrowser = Boolean(window.ogb?.browser);
+  const desktopBrowser = browserAvailable(state.config, Boolean(window.ogb?.browser));
   const browserBlockedOnWindows = window.ogb?.platform === "win32" && !desktopBrowser;
   const browserFeature = builtInBrowserEnabled(state.config);
   const browserAllowed = bot.browser !== false;
@@ -71,7 +71,7 @@ export function useBotSettingsDerived(bot: Bot) {
   // itself; the box-native Computer engine has no browser-only mode.
   const browserSelectable = desktopBrowser && browserFeature && canUseBrowser && engine?.driverKind !== "boxAgent";
   const browserDisabledReason = !desktopBrowser
-    ? "The built-in browser needs the OpenMausBot desktop app"
+    ? browserUnavailableReason(state.config)
     : !browserFeature
       ? "The built-in browser is switched off under App Settings → Experimental"
       : "This model engine cannot use the built-in browser";

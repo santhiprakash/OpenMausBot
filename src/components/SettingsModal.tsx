@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { Coins, FlaskConical, Globe, KeyRound, Monitor, Search, TabletSmartphone, Terminal, Trash2, User, X } from "lucide-react";
 import { api, useStore, type AppSettingsSection, type ConfigStatus } from "@/state/store";
 import { analyticsEnabled, setAnalyticsEnabled } from "@/lib/analytics";
-import { builtInBrowserEnabled, showToolCallsEnabled, skillRecorderEnabled } from "@/lib/feature-flags";
+import { browserAvailable, browserUnavailableReason, builtInBrowserEnabled, showToolCallsEnabled, skillRecorderEnabled } from "@/lib/feature-flags";
 import { localeChoices } from "@/locales";
 import { ApiKeyRow, VpsConnection } from "./ApiKeys";
 import { useUpdaterState } from "@/lib/updater";
@@ -243,7 +243,7 @@ function ExperimentalFeaturesRow() {
   const { state, dispatch } = useStore();
   const skillRecorder = skillRecorderEnabled(state.config);
   const browser = builtInBrowserEnabled(state.config);
-  const desktopBrowser = Boolean(window.ogb?.browser);
+  const desktopBrowser = browserAvailable(state.config, Boolean(window.ogb?.browser));
   const browserBlockedOnWindows = window.ogb?.platform === "win32" && !desktopBrowser;
   const [saving, setSaving] = useState<"skillRecorder" | "browser" | null>(null);
   const [error, setError] = useState("");
@@ -294,8 +294,8 @@ function ExperimentalFeaturesRow() {
                 ? "Enabled for this workspace. Each bot also has its own browser switch."
                 : "Off by default. Enable it to let supported bots use a browser tab you can watch and take over."
               : browserBlockedOnWindows
-                ? "Temporarily unavailable on Windows while Electron's production sandbox support is being verified."
-                : "Needs the OpenMausBot desktop app."}
+                ? "Not available on this Windows machine yet: install the browser engine with `openmausbot browser install`."
+                : browserUnavailableReason(state.config)}
           </div>
         </div>
         <Switch

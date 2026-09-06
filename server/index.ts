@@ -278,6 +278,13 @@ import {
   type BrowserCapability,
   type BrowserConnection,
 } from "./browser-connection.ts";
+import {
+  agentBrowserIntegration,
+  browserEngineEncryptionKey,
+  browserEngineStatus,
+  browserSessionId,
+  describeBrowserEngine,
+} from "./browser-engine.ts";
 import { captureOutsideHumanControl } from "./private-screen-capture.ts";
 import { screenFrameHash, screenTouchingTool, settledFrameIsNews } from "./screen-frame-gate.ts";
 import { RoutineRequestService } from "./routine-requests.ts";
@@ -851,7 +858,7 @@ async function browserIntegration(
   ownerId = randomUUID(),
 ) {
   const connection = availableBrowserConnection();
-  if (!connection) return null;
+  if (!connection) return engineBrowserIntegration(botId, profile);
   const control = controlIntegration(botId, threadId, generation);
   // A profile that no longer exists falls back to the bot's own session.
   // Canonical ids belong to config/bot references; Electron must receive the
@@ -891,6 +898,44 @@ async function browserIntegration(
       },
     },
   };
+}
+
+/** No desktop surface (a server, or a Windows desktop): the bot's browser is
+ * agent-browser, one isolated session per profile or per bot
+ * (docs/plans/browser-engine.md). Returns null, with the reason logged once,
+ * when the engine is not on this machine. */
+function engineBrowserIntegration(botId: string, profile: string | undefined) {
+  const status = browserEngineStatus();
+  if (status.kind !== "ready") {
+    if (!engineUnavailableLogged) {
+      engineUnavailableLogged = true;
+      console.warn(`${describeBrowserEngine(status)}; bots get no browser tools until it is installed`);
+    }
+    return null;
+  }
+  const profileTarget = profile && profile !== "guest" ? browserProfilePartitionTarget(cfg, profile) : null;
+  const partitionId = profile === "guest" ? "guest" : (profileTarget?.partitionId ?? "");
+  const session = browserSessionId(botId, partitionId);
+  return {
+    connection: null,
+    capability: null,
+    profile: partitionId,
+    integration: agentBrowserIntegration({
+      binaryPath: status.binaryPath,
+      session,
+      encryptionKey: browserEngineEncryptionKey(),
+      persistent: profile !== "guest",
+    }),
+  };
+}
+let engineUnavailableLogged = false;
+
+export function browserEngineSummary(): { kind: "desktop" | "headless" | "unavailable"; reason?: string; installable?: boolean; version?: string } {
+  if (availableBrowserConnection()) return { kind: "desktop" };
+  const status = browserEngineStatus();
+  return status.kind === "ready"
+    ? { kind: "headless", version: status.version }
+    : { kind: "unavailable", reason: status.reason, installable: status.installable };
 }
 
 function phoneIntegration() {
@@ -4541,9 +4586,9 @@ async function startTurn(
       // after its own turn.completed would never be torn down — it would
       // keep polling the box forever, carrying dead per-turn state. busy
       // is flipped false in the fold, so it is the honest "still running".
-      if (!previewCapture && browser) {
-        const { connection } = browser;
-        previewCapture = () => browserScreenshot(connection, browser.capability, fetch);
+      if (!previewCapture && browser?.connection && browser.capability) {
+        const { connection, capability } = browser;
+        previewCapture = () => browserScreenshot(connection, capability, fetch);
       }
       if (previewCapture && store.bot(bot.id)?.busy) {
         startScreenPoller(bot.id, previewCapture, { screenIsTheWork: instance.driverKind === "boxAgent" });
@@ -7391,6 +7436,9 @@ function configStatus() {
       showToolCalls: showToolCallsEnabled(cfg),
       browser: builtInBrowserEnabled(cfg),
     },
+    // Which browser this server can give bots: the desktop app's surface,
+    // the agent-browser engine, or nothing yet (with the reason).
+    browserEngine: browserEngineSummary(),
     // partitionId is non-secret routing metadata. The renderer needs it to
     // show the same durable session as an agent, but config PATCH validation
     // keeps it read-only and rejects callers that try to choose it.
