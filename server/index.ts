@@ -465,10 +465,8 @@ const browserCleanup: BrowserCleanupCoordinator = new BrowserCleanupCoordinator(
       : request.partitionId
         ? [browserSessionId("", request.partitionId)]
         : [];
-    // Best effort, never a reason to keep a deleted bot or profile around:
-    // the engine's saved state is a per-session file set, and an engine that
-    // cannot run here (or was never installed) has nothing to clear. A real
-    // failure is logged with the session name so it can be cleared by hand.
+    // Failed erasure leaves the committed intent pending for retry; it must
+    // never acknowledge that saved state was removed when it was not.
     const work = status.kind === "ready" && sessions.length
       ? Promise.all(sessions.map(async (session) => {
           const ok = await clearBrowserSessionState(status.binaryPath, session, { encryptionKey: browserEngineEncryptionKey() });
@@ -476,8 +474,13 @@ const browserCleanup: BrowserCleanupCoordinator = new BrowserCleanupCoordinator(
           return ok;
         }))
       : Promise.resolve([true]);
-    void work.finally(() => {
-      browserCleanup.receive({ type: "openmausbot:browser-lifecycle-result", requestId: request.requestId, ok: true });
+    void work.then((results) => results.every(Boolean), (error) => {
+      console.warn("browser cleanup: could not clear saved session state", error);
+      return false;
+    }).then((ok) => {
+      browserCleanup.receive({ type: "openmausbot:browser-lifecycle-result", requestId: request.requestId, ok });
+    }).catch((error) => {
+      console.warn("browser cleanup: could not acknowledge cleanup", error);
     });
     return true;
   },
@@ -12256,14 +12259,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
       const browserCleanupRequests: BrowserCleanupRequest[] = [];
       try {
-        if (utilityParentPort) {
-          for (const profileId of removedBrowserProfileIds) {
-            const target = browserProfilePartitionTarget(cfg, profileId);
-            if (!target) throw new Error(`browser profile cleanup target “${profileId}” is unavailable`);
-            browserCleanupRequests.push(
-              browserCleanup.prepare("profile", target.profileId, target.partitionId),
-            );
-          }
+        for (const profileId of removedBrowserProfileIds) {
+          const target = browserProfilePartitionTarget(cfg, profileId);
+          if (!target) throw new Error(`browser profile cleanup target “${profileId}” is unavailable`);
+          browserCleanupRequests.push(
+            browserCleanup.prepare("profile", target.profileId, target.partitionId),
+          );
         }
       } catch (error) {
         for (const request of browserCleanupRequests) browserCleanup.abort(request);

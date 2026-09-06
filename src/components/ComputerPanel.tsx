@@ -283,9 +283,11 @@ export function ComputerPanel({
   const [panelView, setPanelView] = useState<ComputerPanelView>(() => readComputerPanelView(bot.id));
   const androidStatus = useAndroidUsbDevices();
   const androidConnected = androidStatus.devices.length > 0;
-  // the built-in browser: a per-bot switch in Settings, and only the desktop app has one
+  // Keep installation reachable before the engine is ready. Actual browser
+  // operations below still require browserAvailableHere.
   const browserAvailableHere = browserAvailable(state.config);
-  const browserEnabled = builtInBrowserEnabled(state.config) && bot.browser !== false && browserAvailableHere;
+  const browserEnabled = builtInBrowserEnabled(state.config) && bot.browser !== false
+    && (browserAvailableHere || state.config?.browserEngine?.installable === true);
   // bumped when a Box API key is saved inline, to re-run the spin-up flow
   const [retry, setRetry] = useState(0);
   const vmReadinessAttempts = useRef(0);

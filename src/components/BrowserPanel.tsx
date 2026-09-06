@@ -23,10 +23,12 @@ export function BrowserPanel({ bot }: { bot: Bot }) {
       if (!response.ok) {
         const body = (await response.json().catch(() => ({}))) as { error?: string };
         setError(body.error ?? `The server answered ${response.status}.`);
-        setRequested(false);
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      // The request only starts installation; subsequent progress/failure is
+      // server-owned. Do not latch the button after a successful HTTP 202.
       setRequested(false);
     }
   };
