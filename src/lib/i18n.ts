@@ -29,7 +29,7 @@ setLocale(globalThis.navigator?.language);
  * meeting a newer server, or a card saved before the key existed) falls back
  * to the English the server sends beside it, so the note always reads. */
 export function tFromServer(key: string | undefined, fallback: string | undefined): string | undefined {
-  return key && key in en ? t(key as LocaleKey) : fallback;
+  return key && Object.hasOwn(en, key) ? t(key as LocaleKey) : fallback;
 }
 
 /** Look up a catalog string. `{name}` placeholders interpolate from params;

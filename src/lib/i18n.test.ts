@@ -118,6 +118,10 @@ describe("tFromServer", () => {
       .toBe("A note from a newer server.");
   });
 
+  it.each(["constructor", "toString", "__proto__"])("rejects inherited catalog property %s", (key) => {
+    expect(tFromServer(key, "A note from the server.")).toBe("A note from the server.");
+  });
+
   it("shows a card that carries only text, and nothing when it carries neither", () => {
     expect(tFromServer(undefined, "Routine could not be applied: disk full"))
       .toBe("Routine could not be applied: disk full");
