@@ -85,6 +85,10 @@ pm2 to keep it up; `openmausbot serve` is a plain foreground process.
 
 ## Docker (with HTTPS on your own domain)
 
+For local Docker Desktop or private Tailscale access without a public domain,
+use the [local Compose setup](../deploy/local/README.md). It defaults to
+`http://localhost:8080` and supports optional `.env` overrides.
+
 One tenant = one container for the server plus Caddy for HTTPS.
 Requirements: Docker with Compose, a DNS name pointing at the machine, and
 ports 80/443 open.
