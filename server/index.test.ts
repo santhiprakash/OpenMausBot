@@ -7,7 +7,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { createServer, request, type Server } from "node:http";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -797,7 +797,23 @@ beforeAll(async () => {
   await new Promise<void>((r) => boxStub.listen(0, "127.0.0.1", r));
   boxStubPort = (boxStub.address() as { port: number }).port;
 
-  child = spawn(process.execPath, [join(SERVER_DIR, "index.ts")], {
+  // Emulate only our temporary browser executable, including on Windows where
+  // the shell-script marker is not executable. No installed browser is used.
+  const browserPrelude = `data:text/javascript,${encodeURIComponent(`
+    import childProcess from "node:child_process";
+    import { syncBuiltinESMExports } from "node:module";
+    const spawn = childProcess.spawn;
+    childProcess.spawn = function(command, args, options) {
+      if (command !== process.env.OMB_AGENT_BROWSER_PATH) return spawn(command, args, options);
+      const program = 'const fs = require("node:fs"); const path = require("node:path"); '
+        + 'const base = path.dirname(process.env.OMB_AGENT_BROWSER_PATH); '
+        + 'fs.appendFileSync(path.join(base, "browser-calls.jsonl"), JSON.stringify({args: process.argv.slice(1), session: process.env.AGENT_BROWSER_SESSION}) + "\\\\n"); '
+        + 'process.exit(fs.existsSync(path.join(base, "browser-clear-fails")) ? 1 : 0);';
+      return spawn(process.execPath, ["-e", program, ...args], options);
+    };
+    syncBuiltinESMExports();
+  `)}`;
+  child = spawn(process.execPath, ["--import", browserPrelude, join(SERVER_DIR, "index.ts")], {
     cwd: ROOT,
     env: {
       ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
@@ -1877,6 +1893,49 @@ describe("harness HTTP API", () => {
     expect(deleted.status).toBe(200);
     const after = await api("GET", "/api/bots");
     expect(after.body.bots.find((b: { id: string }) => b.id === bot.id)).toBeUndefined();
+  });
+
+  it.each([
+    ["bot", "key-write"], ["bot", "engine-exit"],
+    ["profile", "key-write"], ["profile", "engine-exit"],
+  ])("keeps failed browser %s cleanup pending without crashing (%s)", async (target, failure) => {
+    const bot = (await api("POST", "/api/bots")).body.bot;
+    const id = target === "bot" ? bot.id : `cleanup-${failure}`;
+    if (target === "profile") {
+      expect((await api("PATCH", "/api/config", { browserProfiles: [{ id, name: "Cleanup fixture" }] })).status).toBe(200);
+      expect((await api("PATCH", `/api/bots/${bot.id}`, { browserProfile: id })).status).toBe(200);
+    }
+    const key = join(home, ".openmausbot", "browser-engine-key");
+    const backup = `${key}.fixture-backup`;
+    const failureMarker = join(home, "browser-clear-fails");
+    const hadKey = existsSync(key);
+    if (failure === "key-write") {
+      if (hadKey) renameSync(key, backup);
+      mkdirSync(key); // deterministic EISDIR, even when the fixture runs as root
+    } else {
+      writeFileSync(failureMarker, "fail");
+    }
+    const journal = () => JSON.parse(readFileSync(join(home, ".openmausbot", "browser-cleanups.json"), "utf8")) as Array<{ id: string; phase: string }>;
+    try {
+      const deleted = target === "bot"
+        ? await api("DELETE", `/api/bots/${bot.id}`)
+        : await api("PATCH", "/api/config", { browserProfiles: [] });
+      expect(deleted.status).toBe(503);
+      expect(deleted.body.error).toMatch(/could not confirm.*browser data was erased/i);
+      expect(journal()).toContainEqual(expect.objectContaining({ id, phase: "committed" }));
+      expect((await api("GET", "/api/health")).status).toBe(200);
+      expect(child.exitCode).toBeNull();
+    } finally {
+      if (failure === "key-write") {
+        rmSync(key, { recursive: true });
+        if (hadKey) renameSync(backup, key);
+      } else {
+        rmSync(failureMarker);
+      }
+    }
+    // The existing coordinator retries the durable request after recovery.
+    await expect.poll(() => journal().some((request) => request.id === id), { timeout: 8_000 }).toBe(false);
+    if (target === "profile") expect((await api("DELETE", `/api/bots/${bot.id}`)).status).toBe(200);
   });
 
   it("clears an explicit computer to Auto and refuses passive Auto Box provisioning", async () => {
@@ -5689,7 +5748,12 @@ describe("harness HTTP API", () => {
         browserProfiles: [{ id: "client", name: "Client" }],
       })).status).toBe(200);
       expect((await api("PATCH", `/api/bots/${bot.id}`, { browserProfile: "client" })).body.bot.browserProfile).toBe("client");
+      const config = JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8"));
+      const profile = config.browserProfiles.find((entry: { id: string }) => entry.id === "client");
+      rmSync(join(home, "browser-calls.jsonl"), { force: true });
       expect((await api("PATCH", "/api/config", { browserProfiles: [] })).status).toBe(200);
+      const calls = readFileSync(join(home, "browser-calls.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      expect(calls).toContainEqual({ args: ["state", "clear", "--all"], session: profile.partitionId ?? profile.id });
       const state = (await api("GET", "/api/bots")).body;
       expect(state.bots.find((candidate: { id: string }) => candidate.id === bot.id)).not.toHaveProperty("browserProfile");
     } finally {

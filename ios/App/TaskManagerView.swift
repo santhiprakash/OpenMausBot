@@ -52,7 +52,7 @@ struct TaskManagerView: View {
                         } label: {
                             HStack {
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(task.title.isEmpty ? "Untitled task" : task.title)
+                                    task.title.isEmpty ? Text("Untitled task") : Text(verbatim: task.title)
                                         .foregroundStyle(Color.primary)
                                     Text(RelativeStamp.list(task.createdAt))
                                         .font(.caption)

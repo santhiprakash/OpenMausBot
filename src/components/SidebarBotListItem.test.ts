@@ -68,6 +68,18 @@ describe("BotListItem", () => {
     expect(renderRow(bot({ title: "  " }), false)).not.toContain(">Developer</span>");
   });
 
+  it("caps the title badge to a share of the name line, not a fixed width", () => {
+    // a fixed cap freezes the badge at its full width and crushes the name
+    const markup = renderRow(bot({ title: "Meta-Agent — opensource team maintainer" }), false);
+    const badge = /<span class="([^"]*)"[^>]*>Meta-Agent/.exec(markup);
+
+    expect(badge?.[1]).toContain("max-w-[45%]");
+    expect(badge?.[1]).not.toMatch(/max-w-\[\d+px\]/);
+    // the share is of the whole row, so the name line has to fill it
+    const line = /<span class="([^"]*)"><span class="cursor-text truncate"/.exec(markup);
+    expect(line?.[1]).toContain("grow");
+  });
+
   it("shows typing dots instead of preview text while the bot works", () => {
     const markup = renderRow(bot({ busy: true }), false);
 

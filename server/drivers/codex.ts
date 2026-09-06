@@ -905,10 +905,10 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       // multibyte characters that straddle two reads and corrupts the text
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk) => {
-        if (abandoned) return;
+        if (abandoned || state.settled) return;
         buf += chunk;
         let nl;
-        while ((nl = buf.indexOf("\n")) !== -1) {
+        while (!state.settled && (nl = buf.indexOf("\n")) !== -1) {
           const line = buf.slice(0, nl);
           buf = buf.slice(nl + 1);
           if (!line.trim()) continue;

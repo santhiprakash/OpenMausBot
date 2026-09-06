@@ -36,7 +36,7 @@ export const BASE_IMAGE = `${BASE_IMAGE_REPOSITORY}@${BASE_IMAGE_DIGEST}`;
 // Image and container labels below remain the authoritative compatibility
 // check, not the mutable tag.
 export const IMAGE_REPOSITORY = "localhost/openmausbot/cua-local-vm";
-export const IMAGE_LAYER_VERSION = "4";
+export const IMAGE_LAYER_VERSION = "5";
 export const IMAGE_LAYER_LABEL = "com.openmausbot.image-layer";
 export const IMAGE = `${IMAGE_REPOSITORY}:driver-${CUA_DRIVER_VERSION}-v${IMAGE_LAYER_VERSION}`;
 export const CONTAINER = "openmausbot-computer";
@@ -140,6 +140,17 @@ RUN set -eux; \\
     install -D -m 0755 "$driver_bin" ${CUA_EXECUTABLE}; \\
     install -d -o cua -g cua -m 0700 ${VM_WORKSPACE_GUEST}; \\
     test "$(${CUA_EXECUTABLE} --version)" = "cua-driver ${CUA_DRIVER_VERSION}"
+# Install before XFCE starts so the panel and window manager see the font too.
+# Noto Sans CJK JP is distributed under the SIL Open Font License 1.1.
+RUN set -eux; \\
+    install -d -m 0755 /usr/local/share/fonts; \\
+    curl -fsSL 'https://raw.githubusercontent.com/notofonts/noto-cjk/165c01b46ea533872e002e0785ff17e44f6d97d8/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf' -o /usr/local/share/fonts/NotoSansCJKjp-Regular.otf; \\
+    echo '68a3fc98800b2a27b371f2fb79991daf3633bd89309d4ffaa6946fd587f375b5  /usr/local/share/fonts/NotoSansCJKjp-Regular.otf' | sha256sum -c -; \\
+    chmod 0644 /usr/local/share/fonts/NotoSansCJKjp-Regular.otf; \\
+    install -d -m 0755 /usr/local/share/licenses/noto-cjk; \\
+    curl -fsSL 'https://raw.githubusercontent.com/notofonts/noto-cjk/165c01b46ea533872e002e0785ff17e44f6d97d8/LICENSE' -o /usr/local/share/licenses/noto-cjk/OFL.txt; \\
+    echo '6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2  /usr/local/share/licenses/noto-cjk/OFL.txt' | sha256sum -c -; \\
+    fc-cache -f
 RUN printf '%s\\n' \\
       '#!/bin/sh' \\
       'set -eu' \\
@@ -770,13 +781,14 @@ export interface DockerHardeningConfig {
 /** One hardening contract for both managed containers (Local VM here, the
  * BYO-VPS backend in vps-computer.ts): exact resource limits, no privilege,
  * no host namespaces or devices, no disabled security profiles. The only
- * knob the callers legitimately disagree on is the restart policy — the VPS
+ * runtime-specific capability exception is Podman's Firefox sandbox chroot.
+ * Callers also differ on restart policy — the VPS
  * container must survive a reboot nobody is watching ("unless-stopped"),
  * while the Local VM must NOT auto-resume: its desktop leaves a stale X lock
  * on stop, so a restarted container is a broken one. */
 export function dockerSecurityIsHardened(
   config: DockerHardeningConfig | undefined,
-  options: { restartPolicy?: "no" | "unless-stopped" } = {},
+  options: { restartPolicy?: "no" | "unless-stopped"; podmanBrowserSandbox?: boolean } = {},
 ): boolean {
   if (!config) return false;
   const capDrop = (config.CapDrop ?? []).map((cap) => cap.toLowerCase());
@@ -795,7 +807,7 @@ export function dockerSecurityIsHardened(
     (config.NanoCpus ?? 0) === NANO_CPUS &&
     config.PidsLimit === PIDS_LIMIT &&
     capDrop.includes("all") &&
-    capAdd.join(",") === "setgid,setuid" &&
+    capAdd.join(",") === (options.podmanBrowserSandbox ? "setgid,setuid,sys_chroot" : "setgid,setuid") &&
     config.Privileged === false &&
     !config.PidMode &&
     config.IpcMode === "private" &&
@@ -815,7 +827,7 @@ export function dockerSecurityIsHardened(
 /** Podman normalizes HostConfig capability and namespace fields when it
  * serializes inspect output. Validate its authoritative effective/bounding
  * sets, then normalize only those known representation differences through
- * the unchanged Docker hardening contract. */
+ * the shared hardening contract with the Podman-only chroot exception. */
 export function podmanSecurityIsHardened(
   config: DockerHardeningConfig | undefined,
   effectiveCaps: string[] | undefined,
@@ -825,7 +837,7 @@ export function podmanSecurityIsHardened(
   const normalizeCaps = (caps: string[] | undefined) => (caps ?? [])
     .map((cap) => cap.toLowerCase().replace(/^cap_/, ""))
     .sort();
-  const exactCaps = "setgid,setuid";
+  const exactCaps = "setgid,setuid,sys_chroot";
   if (normalizeCaps(effectiveCaps).join(",") !== exactCaps) return false;
   if (normalizeCaps(boundingCaps).join(",") !== exactCaps) return false;
   return dockerSecurityIsHardened({
@@ -839,7 +851,7 @@ export function podmanSecurityIsHardened(
     UsernsMode: config.UsernsMode === "private" || config.UsernsMode === "keep-id:uid=1000,gid=1000"
       ? "" : config.UsernsMode,
     CgroupnsMode: config.CgroupnsMode || "private",
-  });
+  }, { podmanBrowserSandbox: true });
 }
 
 export function containerRunArgs(
@@ -916,6 +928,9 @@ export function containerRunArgs(
       "512m",
     );
   }
+  // Podman's default seccomp profile gates chroot on this capability.
+  // Firefox uses chroot inside its own namespace to establish its sandbox.
+  if (runtime === "podman") common.push("--cap-add", "SYS_CHROOT");
   common.push(
     "--mount",
     runtime === "podman"

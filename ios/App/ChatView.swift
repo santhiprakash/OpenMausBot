@@ -265,6 +265,19 @@ struct ChatView: View {
                 // than the screen rests at the bottom, and opening a chat
                 // starts on the newest message rather than the oldest.
                 .defaultScrollAnchor(.bottom)
+                // Tapping the transcript puts the keyboard away. The composer
+                // is a sibling of this scroll view rather than inside it, so
+                // nothing else here drops its focus — until this, the only way
+                // back to the whole conversation was to leave the chat.
+                // Simultaneous, not `.onTapGesture`: a tap that lands on a
+                // link, a card button or a selected word still reaches the row
+                // that owns it, and only also closes the keyboard.
+                .simultaneousGesture(TapGesture().onEnded {
+                    if composerFocused { composerFocused = false }
+                })
+                // And a drag down over the transcript pushes it away, the way
+                // it does in Mail and Messages.
+                .scrollDismissesKeyboard(.interactively)
                 .onChange(of: transcript.last?.id) { _, _ in
                     guard let last = transcript.last else { return }
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
@@ -568,8 +581,8 @@ struct ChatView: View {
     private struct PlusAction: Identifiable {
         let id: String
         let systemImage: String
-        let title: String
-        let subtitle: String
+        let title: LocalizedStringKey
+        let subtitle: LocalizedStringKey
         var destructive = false
         var disabled = false
         let run: () -> Void
@@ -1550,15 +1563,17 @@ struct CredentialRequestCardView: View {
     private var tint: Color { MausPalette.color(message.from?.color ?? chat.color) }
     private var requester: String { message.from?.name ?? chat.name }
     private var label: String { visible(secret.label) ?? "API credential" }
-    private var accessibilityStatus: String {
+    private var accessibilityStatus: Text {
         if secret.provided == true {
-            return secret.resumed == true ? "Saved securely. The task resumed." : "Saved securely on your computer."
+            return secret.resumed == true
+            ? Text("Saved securely. The task resumed.")
+            : Text("Saved securely on your computer.")
         }
-        if secret.dismissed == true { return "Not provided." }
-        if submitted { return "Encrypted and sent to your computer." }
-        if canEnterOnPhone { return "Enter it securely on this phone." }
-        if !hasSecurePairing { return "Pair again by QR code, or finish on your computer." }
-        return "Use secure phone access or Tailscale, or finish on your computer."
+        if secret.dismissed == true { return Text("Not provided.") }
+        if submitted { return Text("Encrypted and sent to your computer.") }
+        if canEnterOnPhone { return Text("Enter it securely on this phone.") }
+        if !hasSecurePairing { return Text("Pair again by QR code, or finish on your computer.") }
+        return Text("Use secure phone access or Tailscale, or finish on your computer.")
     }
 
     private func visible(_ value: String?) -> String? {
@@ -1988,7 +2003,7 @@ struct CardView: View {
                                     .font(.system(size: 10, design: .monospaced))
                                     .foregroundStyle(Color.secondary)
                             }
-                            Text("Source: \(skill.source ?? "Unknown")")
+                            Text(skill.source.map { LocalizedStringKey("Source: \($0)") } ?? "Source: unknown")
                                 .font(.system(size: 11))
                                 .foregroundStyle(Color.secondary)
                                 .textSelection(.enabled)

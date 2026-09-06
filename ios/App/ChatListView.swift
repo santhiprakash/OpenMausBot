@@ -40,7 +40,7 @@ struct ChatListView: View {
                         } else {
                             if !searchHits.isEmpty {
                                 HStack {
-                                    sectionLabel("Messages")
+                                    sectionLabel(Text("Messages"))
                                     Spacer()
                                     if searching { ProgressView().controlSize(.small) }
                                 }
@@ -61,7 +61,7 @@ struct ChatListView: View {
                                     .buttonStyle(.plain)
                                     .padding(.horizontal, 16)
                                 }
-                                sectionLabel("Chats")
+                                sectionLabel(Text("Chats"))
                                     .padding(.top, 14)
                                     .padding(.bottom, 4)
                             } else if searching {
@@ -178,7 +178,8 @@ struct ChatListView: View {
             ProfileAvatar(name: session.connection?.name ?? "You", size: 30)
                 .frame(width: 44, height: 44)
                 .glassCapsule(interactive: false)
-                .accessibilityLabel("Connected to \(session.connection?.name ?? "your computer")")
+                .accessibilityLabel(session.connection.map { LocalizedStringKey("Connected to \($0.name)") }
+                    ?? "Connected to your computer")
 
             Spacer(minLength: 8)
 
@@ -230,7 +231,7 @@ struct ChatListView: View {
 
         let pinned = summaries(for: session.state.pinnedBots)
         if !pinned.isEmpty {
-            sectionLabel("Pinned")
+            sectionLabel(Text("Pinned"))
                 .padding(.top, 2)
                 .padding(.bottom, 4)
             botRows(pinned)
@@ -248,7 +249,7 @@ struct ChatListView: View {
 
         let unsectioned = summaries(for: session.state.unsectionedBots)
         if !unsectioned.isEmpty {
-            sectionLabel("Bots")
+            sectionLabel(Text("Bots"))
                 .padding(.top, 18)
                 .padding(.bottom, 4)
             botRows(unsectioned)
@@ -256,7 +257,7 @@ struct ChatListView: View {
 
         ForEach(session.state.sidebarSections) { section in
             VStack(alignment: .leading, spacing: 0) {
-                sectionLabel(section.name)
+                sectionLabel(Text(verbatim: section.name))
                     .padding(.top, 18)
                     .padding(.bottom, section.chiefs.isEmpty && !section.channels.isEmpty ? 10 : 4)
                 if !section.chiefs.isEmpty {
@@ -272,9 +273,9 @@ struct ChatListView: View {
         }
     }
 
-    private func channelsStrip(title: String, rooms: [Room], showsCreate: Bool) -> some View {
+    private func channelsStrip(title: LocalizedStringKey, rooms: [Room], showsCreate: Bool) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionLabel(title)
+            sectionLabel(Text(title))
             channelTiles(rooms, showsCreate: showsCreate)
         }
         .padding(.top, 2)
@@ -492,8 +493,9 @@ struct ChatListView: View {
         return chats.isEmpty && searchHits.isEmpty && !searching
     }
 
-    private func sectionLabel(_ text: String) -> some View {
-        Text(text.uppercased())
+    private func sectionLabel(_ text: Text) -> some View {
+        text
+            .textCase(.uppercase)
             .font(.system(size: 13, weight: .semibold))
             .tracking(0.4)
             .foregroundStyle(Color.secondary)

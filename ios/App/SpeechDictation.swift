@@ -19,6 +19,7 @@ import AVFoundation
 import Combine
 import Speech
 import CompanionCore
+import SwiftUI
 
 @MainActor
 final class SpeechDictation: ObservableObject {
@@ -33,7 +34,7 @@ final class SpeechDictation: ObservableObject {
     /// system permission sheets are still in flight.
     @Published private(set) var isStarting = false
     @Published private(set) var transcript = ""
-    @Published private(set) var error: String?
+    @Published private(set) var error: LocalizedStringKey?
 
     /// Composer text captured when listening started. Frozen for the
     /// session so each partial replaces the last rather than stacking.
@@ -251,8 +252,8 @@ final class SpeechDictation: ObservableObject {
         case noRecognizer
     }
 
-    static let speechDeniedMessage =
+    static let speechDeniedMessage: LocalizedStringKey =
         "Dictation needs Speech Recognition access. Enable it in Settings → OpenMausMobile."
-    static let micDeniedMessage =
+    static let micDeniedMessage: LocalizedStringKey =
         "Dictation needs Microphone access. Enable it in Settings → OpenMausMobile."
 }

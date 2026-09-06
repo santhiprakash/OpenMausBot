@@ -7,7 +7,7 @@
 //   FAKE_CODEX_MODE   happy (default) | approval | resume | stream | windows-command |
 //                     mcp-elicitation | mcp-app-approval | mcp-form | permissions-approval | config-profile |
 //                     config-profile-unsupported | config-read-error | image |
-//                     logged-in-stdout | logged-out | unauthorized
+//                     logged-in-stdout | logged-out | unauthorized | late-request
 //   FAKE_CODEX_DUMP   path to write {pid, argv, env, calls, decision} as JSON
 //
 // Keep this file dependency-free — it runs as a bare `node` subprocess.
@@ -69,7 +69,12 @@ const finishTurn = () => {
   notify("item/completed", { item: { id: "m1", type: "agentMessage", text: "done from fake codex" } });
   notify("thread/tokenUsage/updated", { tokenUsage: { total: { inputTokens: 7, cachedInputTokens: 4, outputTokens: 3 } } });
   dump();
+  if (mode === "late-request") process.stdout.cork();
   notify("turn/completed", { turn: { status: "completed" } });
+  if (mode === "late-request") {
+    out({ jsonrpc: "2.0", id: 100, method: "execCommandApproval", params: { command: "echo too late" } });
+    process.stdout.uncork();
+  }
 };
 
 let buf = "";
