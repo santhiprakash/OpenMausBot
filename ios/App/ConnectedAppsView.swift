@@ -129,7 +129,7 @@ struct ConnectedAppsView: View {
                 }
                 .disabled(catalog?.configured != true)
             } else if accounts.isEmpty {
-                let statusLabel = isPending ? "Connecting…" : "Connected"
+                let statusLabel: LocalizedStringKey = isPending ? "Connecting…" : "Connected"
                 let statusSymbol = isPending ? "clock" : "checkmark.circle.fill"
                 Label(statusLabel, systemImage: statusSymbol)
                     .foregroundStyle(isPending ? Color.secondary : Color.green)

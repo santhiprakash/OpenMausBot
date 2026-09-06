@@ -140,7 +140,9 @@ private struct RoutineRow: View {
             else { Image(systemName: "calendar.badge.exclamationmark").frame(width: 42, height: 42) }
             VStack(alignment: .leading, spacing: 3) {
                 Text(routine.name).font(.headline)
-                Text("\(bot?.name ?? "Deleted agent") · \(routine.schedule.summary) · \(routine.runLocation.label)")
+                ((bot.map { Text(verbatim: $0.name) } ?? Text("Deleted agent"))
+                    + Text(verbatim: " · \(routine.schedule.summary) · ")
+                    + Text(LocalizedStringKey(routine.runLocation.label)))
                     .font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }
             Spacer()
@@ -177,7 +179,8 @@ private struct RoutineRunRow: View {
                 Image(systemName: run.status.symbol).foregroundStyle(run.status.tint)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(run.routineName)
-                    Text("\(bot?.name ?? "Deleted agent") · \(Date(timeIntervalSince1970: run.scheduledFor / 1_000).formatted(date: .abbreviated, time: .shortened))")
+                    ((bot.map { Text(verbatim: $0.name) } ?? Text("Deleted agent"))
+                        + Text(verbatim: " · \(Date(timeIntervalSince1970: run.scheduledFor / 1_000).formatted(date: .abbreviated, time: .shortened))"))
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -377,7 +380,7 @@ private struct RoutineEditorView: View {
                             }
                         }
                     } label: {
-                        Text("Advanced · \(timeoutMinutes.map { "\(Self.durationLabel($0)) run limit" } ?? "no run limit")")
+                        timeoutMinutes.map { Text("Advanced · \(Self.durationLabel($0)) run limit") } ?? Text("Advanced · no run limit")
                     }
                 } footer: {
                     if advancedExpanded {
