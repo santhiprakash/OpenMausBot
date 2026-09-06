@@ -11,6 +11,16 @@ the normal Local VM lifecycle. Retain the workspace bind mount; do not delete
 user files or silently recreate a busy desktop. Privileged mode and unconfined
 security profiles are not required or accepted by this repair.
 
+An old container is reported as unsafe/not ready with a request to recreate it;
+status checks and chat turns do not automatically replace it. Once its current
+work has finished, save any needed files under `/home/cua/workspace`. For a
+per-bot desktop, use that bot's Computer panel to recreate it and confirm the
+existing prompt. For the shared desktop, use **Delete and recreate** in the
+Local VM settings. The existing remove/run lifecycle retains the same workspace
+bind mount. Files elsewhere in the container, including Firefox profiles outside
+the workspace, are discarded; copy anything needed into the workspace first.
+Restarting the old container does not add the new capability.
+
 ## Isolated before/after acceptance
 
 Set `OMB_VERIFY_PODMAN` and `OMB_VERIFY_MACHINE` explicitly, with the managed

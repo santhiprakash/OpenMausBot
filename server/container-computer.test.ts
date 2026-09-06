@@ -25,6 +25,7 @@ import {
   containerComputerStatus,
   containerRuntimeStatus,
   containerRunArgs,
+  dockerSecurityIsHardened,
   localVmRecreatableOnDemand,
   managedImageDockerfile,
   perBotLocalVmTarget,
@@ -156,7 +157,8 @@ describe("containerComputerStatus", () => {
     });
   });
 
-  it("accepts exact Podman-on-Windows hardening and its WSL-translated durable mount", async () => {
+  it.each(["exact", "legacy", "missing-effective", "missing-bounding", "extra-effective", "extra-bounding"])(
+    "checks Podman-on-Windows readiness with %s capabilities and a WSL-translated durable mount", async (caps) => {
     const derived = perBotLocalVmTarget("bot-win");
     const target: LocalVmTarget = {
       ...derived,
@@ -174,6 +176,10 @@ describe("containerComputerStatus", () => {
     };
     detail.EffectiveCaps = ["CAP_SETGID", "CAP_SETUID", "CAP_SYS_CHROOT"];
     detail.BoundingCaps = ["CAP_SETGID", "CAP_SETUID", "CAP_SYS_CHROOT"];
+    if (caps === "legacy" || caps === "missing-effective") detail.EffectiveCaps.pop();
+    if (caps === "legacy" || caps === "missing-bounding") detail.BoundingCaps.pop();
+    if (caps === "extra-effective") detail.EffectiveCaps.push("CAP_SYS_ADMIN");
+    if (caps === "extra-bounding") detail.BoundingCaps.push("CAP_SYS_ADMIN");
     const targetDriverExec =
       `podman exec -u cua -e HOME=/home/cua -e DISPLAY=:1 -e CUA_DRIVER_INSTALL_CHANNEL=python_package ` +
       `-e CUA_DRIVER_RS_TELEMETRY_ENABLED=0 ${target.containerName} ${CUA_EXECUTABLE}`;
@@ -195,6 +201,14 @@ describe("containerComputerStatus", () => {
     });
 
     const status = await containerComputerStatus(fake.run, "win32", target);
+    if (caps !== "exact") {
+      expect(status).toMatchObject({ security: "unsafe", ready: false });
+      expect(status.problem).toContain("recreate");
+      expect(localVmRecreatableOnDemand(status)).toBe(false);
+      expect(fake.calls.some((call) => call.startsWith("podman exec "))).toBe(false);
+      expect(fake.calls.some((call) => /^podman (run|rm|start|stop) /.test(call))).toBe(false);
+      return;
+    }
 
     expect(status).toMatchObject({
       runtime: "podman",
@@ -246,6 +260,14 @@ describe("containerComputerStatus", () => {
       ["CAP_NET_RAW", "CAP_SETGID", "CAP_SETUID", "CAP_SYS_CHROOT"],
       ["CAP_SETGID", "CAP_SETUID", "CAP_SYS_CHROOT"],
     )).toBe(false);
+  });
+
+  it.each(["no", "unless-stopped"] as const)("does not extend Docker/VPS capabilities with restart policy %s", (restartPolicy) => {
+    const config = JSON.parse(readyInspect())[0].HostConfig;
+    config.RestartPolicy.Name = restartPolicy;
+    expect(dockerSecurityIsHardened(config, { restartPolicy })).toBe(true);
+    config.CapAdd.push("CAP_SYS_CHROOT");
+    expect(dockerSecurityIsHardened(config, { restartPolicy })).toBe(false);
   });
 
   it("keeps per-bot identities, workspaces, and ephemeral viewer ports separate", async () => {
