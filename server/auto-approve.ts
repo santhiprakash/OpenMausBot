@@ -280,8 +280,21 @@ export function approvalHeldReason(context: {
   if (context.requiresExplicitApproval) {
     return "This changes the provider sandbox, so only Full access can approve it automatically.";
   }
+  // Host control reaches this only over a grant that would otherwise have
+  // fired, in a mode that explains nothing else. "I pressed Always allow and
+  // it asked anyway" is the whole confusion, so answer that and not the mode.
+  if (context.source === "local-computer-block") {
+    return "Controlling your computer is never covered by Always allow, so this needs you.";
+  }
   if (context.mode !== "auto") return undefined;
-  if (!context.unattended) return "This action needs you, so Approve for me stopped to ask.";
-  const hint = context.fullAccessAvailable ? " Full access keeps working unattended." : "";
-  return `A webhook or another bot started this turn, so Approve for me is paused and every action asks.${hint}`;
+  if (context.unattended) {
+    const hint = context.fullAccessAvailable ? " Full access keeps working unattended." : "";
+    return `A webhook or another bot started this turn, so Approve for me is paused and every action asks.${hint}`;
+  }
+  // A guard names itself. Both stop the same mode, but one is about damage
+  // and the other about secrets, and a read-only .env card that says
+  // "destructive" teaches people to stop reading these.
+  if (context.source === "destructive-guard") return "This looks destructive, so Approve for me stopped to ask.";
+  if (context.source === "sensitive-guard") return "This touches credentials, so Approve for me stopped to ask.";
+  return "This action needs you, so Approve for me stopped to ask.";
 }
