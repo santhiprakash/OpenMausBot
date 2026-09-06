@@ -303,4 +303,66 @@ describe("approvalHeldReason", () => {
     expect(approvalHeldReason({ ...auto, unattended: true, mode: "ask" })).toBeUndefined();
     expect(approvalHeldReason({ ...auto, unattended: true, mode: "full" })).toBeUndefined();
   });
+
+  // Reported as "safe reads look destructive": both guards stopped the same
+  // mode, so both cards read the same, and a read-only .env card claimed the
+  // action was destructive. Each guard now says which one it was.
+  it("names the guard that stopped the action", () => {
+    expect(approvalHeldReason({ ...auto, unattended: false, source: "destructive-guard" }))
+      .toBe("This looks destructive, so Approve for me stopped to ask.");
+    expect(approvalHeldReason({ ...auto, unattended: false, source: "sensitive-guard" }))
+      .toBe("This touches credentials, so Approve for me stopped to ask.");
+  });
+
+  it("keeps the generic note for a hold no guard explains", () => {
+    expect(approvalHeldReason({ ...auto, unattended: false, source: "no-grant" }))
+      .toBe("This action needs you, so Approve for me stopped to ask.");
+  });
+
+  // The paused mode outranks the guard: a fleet operator reading a guard card
+  // would otherwise think the next action passes, which is what #809 fixed.
+  it("keeps the unattended note ahead of either guard", () => {
+    for (const source of ["destructive-guard", "sensitive-guard"] as const) {
+      expect(approvalHeldReason({ ...auto, unattended: true, source })).toContain("every action asks");
+    }
+  });
+
+  it("keeps the native and sandbox notes ahead of either guard", () => {
+    expect(approvalHeldReason({ ...auto, unattended: false, source: "native-approval" }))
+      .toBe("The provider requires your approval for this action.");
+    expect(approvalHeldReason({ ...auto, unattended: false, source: "destructive-guard", requiresExplicitApproval: true }))
+      .toContain("only Full access can approve it automatically");
+  });
+
+  // This one reaches the card only over a grant that would have fired, in Ask,
+  // where nothing else speaks — so it explained itself not at all.
+  it("explains a remembered grant that host control refuses", () => {
+    expect(approvalHeldReason({ ...auto, mode: "ask", unattended: false, source: "local-computer-block" }))
+      .toBe("Controlling your computer is never covered by Always allow, so this needs you.");
+  });
+});
+
+// The issue's own reproduction, end to end: the verdict already knew these
+// two apart, and only the card threw that away.
+describe("approvalHeldReason over a real verdict", () => {
+  const held = (summary: string) => {
+    const verdict = autoVerdict({ approvalMode: "auto" }, "Bash", summary);
+    return {
+      source: verdict.source,
+      text: approvalHeldReason({
+        source: verdict.source, permission: true, mode: "auto",
+        unattended: false, fullAccessAvailable: true,
+      }),
+    };
+  };
+
+  it("tells a read-only .env apart from an rm -rf", () => {
+    const sensitive = held("cat .env");
+    const destructive = held("rm -rf /tmp/build");
+    expect(sensitive.source).toBe("sensitive-guard");
+    expect(destructive.source).toBe("destructive-guard");
+    expect(sensitive.text).not.toBe(destructive.text);
+    expect(sensitive.text).not.toContain("destructive");
+    expect(destructive.text).toContain("destructive");
+  });
 });

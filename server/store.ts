@@ -55,7 +55,9 @@ export interface OptionCardData {
   /** permission cards: the tool being requested, so the card can show what
    * is actually being asked and offer "always allow this tool". */
   tool?: string;
-  /** why this stopped despite auto mode (destructive-looking command) */
+  /** why this card is waiting: the guard, mode, sandbox or native note from
+   * approvalHeldReason, or a delivery/apply error from a routine or profile
+   * request. Free text either way, so it is shown verbatim. */
   held?: string;
   /** the narrow grant "always allow" remembers, e.g. "Bash:git" */
   allowKey?: string;
