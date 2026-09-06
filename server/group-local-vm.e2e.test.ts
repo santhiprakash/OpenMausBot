@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { writeFileAtomic } from "./atomic.ts";
 import { freePortBlock } from "./testing/ports.ts";
 import { removeTempDir, waitForExit } from "./testing/cleanup.ts";
 
@@ -15,7 +16,7 @@ let stateFile = "";
 let dumpFile = "";
 let finishFile = "";
 let stderr = "";
-const vmState = (state: Record<string, unknown> = {}) => writeFileSync(stateFile, JSON.stringify(state));
+const vmState = (state: Record<string, unknown> = {}) => writeFileAtomic(stateFile, JSON.stringify(state));
 const api = async (method: string, path: string, body?: unknown) => {
   const r = await fetch(base + path, { method, headers: { "content-type": "application/json" },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
