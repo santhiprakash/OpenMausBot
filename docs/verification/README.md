@@ -51,6 +51,9 @@ against an isolated server for image decoding, loading, and recovery UI checks.
 The [bot settings fixture](bot-settings.md) checks profile saves, standing
 instructions, history restore, skill/memory refresh, and stale-response isolation.
 
+The [Group and Goal Local VM recipe](group-local-vm.md) checks per-speaker
+desktop routing, cancellation, and computer authority cleanup.
+
 ## Evidence
 
 The optional [Podman full-stack acceptance recipe](podman-self-hosting.md)

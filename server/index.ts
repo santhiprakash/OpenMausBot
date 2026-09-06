@@ -493,6 +493,7 @@ type InternalCapability = {
   skillAuthoring: boolean;
   createdBots: number;
   orphanExpiresAt: number;
+  localVmTarget?: LocalVmTarget;
 };
 // A capability lives for the exact provider-turn generation, including while
 // that turn is parked on a human approval. The long ceiling is only an orphan
@@ -569,12 +570,8 @@ function revokeInternalCapabilityForProviderEvent(event: RuntimeEvent): void {
  * length; only capabilities for currently active turns are retained. */
 function authorizedInternalCapability(header: string | string[] | undefined): InternalCapability | null {
   const got = Buffer.from(Array.isArray(header) ? "" : (header ?? ""));
-  const now = Date.now();
   for (const [token, capability] of internalCapabilities) {
-    if (
-      capability.orphanExpiresAt <= now ||
-      activeInternalGenerationByThread.get(capability.threadId) !== capability.generation
-    ) {
+    if (!internalCapabilityIsActive(capability)) {
       internalCapabilities.delete(token);
       continue;
     }
@@ -585,6 +582,11 @@ function authorizedInternalCapability(header: string | string[] | undefined): In
 }
 
 function internalCapabilityIsActive(capability: InternalCapability): boolean {
+  if (capability.localVmTarget) {
+    const owner = localVmLeaseFor(capability.localVmTarget).current(localVmOwnerBusy);
+    if (localVmThreadTargets.get(capability.threadId) !== capability.localVmTarget ||
+        owner?.threadId !== capability.threadId || owner.botId !== capability.botId) return false;
+  }
   return (
     capability.orphanExpiresAt > Date.now() &&
     activeInternalGenerationByThread.get(capability.threadId) === capability.generation
@@ -999,7 +1001,7 @@ const routineRequestEnvelopeSchema = z.discriminatedUnion("action", [
 ]);
 
 /** The loopback endpoint a bot's computer proxy polls before acting. */
-function controlIntegration(botId: string, threadId: string, generation: string) {
+function controlIntegration(botId: string, threadId: string, generation: string, localVmTarget?: LocalVmTarget) {
   return {
     url: `http://127.0.0.1:${PORT}/api/internal/computer-control?botId=${encodeURIComponent(botId)}`,
     token: mintInternalCapability({
@@ -1008,6 +1010,7 @@ function controlIntegration(botId: string, threadId: string, generation: string)
       generation,
       depth: 0,
       kind: "computer",
+      ...(localVmTarget ? { localVmTarget } : {}),
       skillAuthoring: false,
       createdBots: 0,
     }),
@@ -2405,6 +2408,7 @@ const watchdog = new TurnWatchdog({
   stallMs: TURN_STALL_MS,
   checkMs: 60_000,
   onStall: (turn) => {
+    const stalledVmTarget = localVmThreadTargets.get(turn.threadId);
     void releaseBrowserCapabilityForThread(turn.threadId);
     revokeInternalCapabilitiesForThread(turn.threadId);
     repeats.settle(turn.threadId);
@@ -2433,6 +2437,9 @@ const watchdog = new TurnWatchdog({
         const retry = setTimeout(releaseOwnership, 1_000);
         retry.unref?.();
         return;
+      }
+      if (stalledVmTarget && localVmThreadTargets.get(turn.threadId) === stalledVmTarget) {
+        releaseLocalVmThread(turn.threadId);
       }
       const group = store.groupByThread(turn.threadId);
       const speaker = groupSpeakers.get(turn.threadId);
@@ -5337,6 +5344,12 @@ async function runGroupMemberTurn(
   const internalGeneration = beginInternalCapabilityGeneration(threadId);
   let roomVmTarget: ReturnType<typeof localVmTargetForBot> | null = null;
   let retainRoomVmLease = false;
+  let roomSpeaker: { botId: string; name: string; color: string } | undefined;
+  let providerDispatched = false;
+  const releaseRoomVmLease = () => {
+    if (roomVmTarget && localVmThreadTargets.get(threadId) === roomVmTarget) releaseLocalVmThread(threadId);
+    roomVmTarget = null;
+  };
   try {
   const integrations: NonNullable<Parameters<typeof instance.adapter.sendTurn>[0]["integrations"]> = {};
   const skillAuthoring =
@@ -5549,7 +5562,8 @@ async function runGroupMemberTurn(
   }
 
   store.patchGroup(readyGroup.id, { busyBotId: bot.id }); // the store's change stream carries the frame
-  groupSpeakers.set(threadId, { botId: bot.id, name: bot.name, color: bot.color });
+  roomSpeaker = { botId: bot.id, name: bot.name, color: bot.color };
+  groupSpeakers.set(threadId, roomSpeaker);
 
   // Room and Goal turns use the speaker's desktop, never the coordinator's.
   // Claim the same lease as direct turns before asynchronous VM setup.
@@ -5557,7 +5571,8 @@ async function runGroupMemberTurn(
     if (instance.adapter.capabilities.computerMcp !== true || instance.driverKind === "boxAgent") {
       throw new Error("this model engine cannot use the Local VM");
     }
-    const target = localVmTargetForBot(readyBot.id);
+    // A distinct identity fences cleanup even in shared mode on the same room thread.
+    const target = { ...localVmTargetForBot(readyBot.id) };
     if (localVmImageBusy || localVmModeChangeBusy || localVmLifecycleBusy.has(target.key)) {
       throw new Error("this Local VM is being started, stopped, or replaced");
     }
@@ -5568,14 +5583,24 @@ async function runGroupMemberTurn(
     localVmThreadTargets.set(threadId, target);
     localVmActiveThreads.set(target.key, threadId);
     localVmIdleFor(target).touch();
-    const vm = await readyLocalVmForTurn(readyBot.id, target);
-    if (isCancelled?.() || !store.bot(readyBot.id)?.busy || store.group(readyGroup.id)?.busyBotId !== readyBot.id) {
+    const setupIsCurrent = () => !isCancelled?.() &&
+      groupSpeakers.get(threadId) === roomSpeaker &&
+      activeInternalGenerationByThread.get(threadId) === internalGeneration &&
+      store.group(readyGroup.id)?.memberIds.includes(readyBot.id) === true &&
+      store.bot(readyBot.id)?.busy === true &&
+      store.group(readyGroup.id)?.busyBotId === readyBot.id;
+    const vm = await readyLocalVmForTurn(readyBot.id, target, setupIsCurrent);
+    if (!setupIsCurrent()) {
       return false;
     }
     if (!vm.ready || !vm.runtime) throw new Error(vm.problem ?? "the Local VM is not ready");
+    const owner = localVmLeaseFor(target).current(localVmOwnerBusy);
+    if (owner?.threadId !== threadId || owner.botId !== readyBot.id) {
+      throw new Error("the Local VM lease expired while preparing the turn");
+    }
     integrations.localComputer = containerComputerMcp(
       vm.runtime,
-      controlIntegration(readyBot.id, threadId, internalGeneration),
+      controlIntegration(readyBot.id, threadId, internalGeneration, target),
       target,
     );
   }
@@ -5733,6 +5758,7 @@ async function runGroupMemberTurn(
     });
     watchdog.watch(threadId, bot.id);
     onProviderHandshakeStarted?.();
+    providerDispatched = true;
     guardTurnDispatch(instance.adapter.sendTurn({
         threadId,
         text,
@@ -5786,9 +5812,7 @@ async function runGroupMemberTurn(
   // member's generation.
   revokeInternalCapabilityGeneration(threadId, internalGeneration);
   retainRoomVmLease = outcome === "timed_out" || outcome === "stalled";
-  if (!retainRoomVmLease && roomVmTarget && localVmThreadTargets.get(threadId) === roomVmTarget) {
-    releaseLocalVmThread(threadId);
-  }
+  if (!retainRoomVmLease) releaseRoomVmLease();
   if (orchestration) {
     orchestration.result.replyText = replyText.trim();
     orchestration.result.outcome = outcome;
@@ -5828,6 +5852,7 @@ async function runGroupMemberTurn(
         retry.unref?.();
         return;
       }
+      releaseRoomVmLease();
       const currentGroup = store.group(group.id);
       const speaker = groupSpeakers.get(threadId);
       if (currentGroup?.busyBotId === bot.id && speaker?.botId === bot.id) {
@@ -5936,12 +5961,33 @@ async function runGroupMemberTurn(
     }
   }
   return true;
+  } catch (error) {
+    if (providerDispatched || !roomSpeaker) throw error;
+    const message = error instanceof Error ? error.message : "Local VM setup failed";
+    store.appendMessage(threadId, {
+      role: "bot", kind: "activity",
+      from: { botId: bot.id, name: bot.name, color: bot.color },
+      tool: { name: `error: ${message}`, ok: false },
+    });
+    onDispatchError?.(message);
+    if (orchestration) orchestration.result.outcome = "dispatch_failed";
+    return false;
   } finally {
     // Covers connector/setup failures, cancellation before dispatch, and all
     // other early returns that never produce a provider terminal event.
     revokeInternalCapabilityGeneration(threadId, internalGeneration);
-    if (!retainRoomVmLease && roomVmTarget && localVmThreadTargets.get(threadId) === roomVmTarget) {
-      releaseLocalVmThread(threadId);
+    if (!retainRoomVmLease) releaseRoomVmLease();
+    if (!providerDispatched && roomSpeaker && groupSpeakers.get(threadId) === roomSpeaker) {
+      groupSpeakers.delete(threadId);
+      if (store.group(group.id)?.busyBotId === bot.id) store.patchGroup(group.id, { busyBotId: null });
+      if (store.bot(bot.id)?.busy) {
+        store.setActivity(bot.id, "idle");
+        retryDelegationsWaitingOn(bot.id);
+      }
+      await releaseBrowserCapabilityForThread(threadId);
+      drainQueuedSends();
+      drainConnectorResumes();
+      drainSecretResumes();
     }
   }
 }
@@ -7395,13 +7441,14 @@ async function localVmPayload(target: LocalVmTarget) {
  * instance cap; creating past it would quietly do what the lifecycle route
  * refuses.
  */
-async function readyLocalVmForTurn(botId: string, target: LocalVmTarget) {
+async function readyLocalVmForTurn(botId: string, target: LocalVmTarget, isCurrent = () => true) {
   let status = await containerComputerStatus(undefined, undefined, target);
+  if (!isCurrent()) return status;
   if (status.ready || !localVmRecreatableOnDemand(status)) return status;
 
   if (target.key !== SHARED_LOCAL_VM_TARGET.key) {
     const count = await existingPerBotLocalVmCount(status.runtime);
-    if (count >= localVmMaxInstances(cfg)) return status;
+    if (!isCurrent() || count >= localVmMaxInstances(cfg)) return status;
   }
 
   broadcast({ kind: "computer", botId, state: "provisioning" });
@@ -7423,8 +7470,9 @@ async function readyLocalVmForTurn(botId: string, target: LocalVmTarget) {
   // the turn is the whole point: a person who has been away eight hours should
   // not have to send their message twice.
   const deadline = Date.now() + LOCAL_VM_DESKTOP_WAIT_MS;
-  while (!status.ready && status.container === "running" && Date.now() < deadline) {
+  while (isCurrent() && !status.ready && status.container === "running" && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 2_000));
+    if (!isCurrent()) break;
     status = await containerComputerStatus(undefined, undefined, target);
   }
   return status;
