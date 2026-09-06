@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const podman = process.env.OMB_VERIFY_PODMAN;
@@ -18,6 +18,11 @@ process.env.USERPROFILE = fixtureHome;
 process.env.OMB_DATA_DIR = resolve(fixtureHome, "app-data");
 const { containerRunArgs, perBotLocalVmTarget, IMAGE } = await import("../server/container-computer.ts");
 const run = (args: string[]) => execFileSync(podman, ["--connection", machine, ...args], { env: engineEnv, encoding: "utf8", timeout: 90_000 }).trim();
+const sandboxProbe = readFileSync(new URL("./testing/firefox-sandbox.py", import.meta.url), "utf8");
+const assertSandboxEnabled = (report: { effectiveContentSandboxLevel: number }) => {
+  assert(Number.isInteger(report.effectiveContentSandboxLevel) && report.effectiveContentSandboxLevel > 0,
+    "Firefox effective content sandbox must be enabled");
+};
 const receipt = [];
 for (const mode of ["before", "after"] as const) {
   const workspace = execFileSync(podman, ["machine", "ssh", machine, "mktemp", "-d", "/tmp/omb-firefox-XXXXXXXX"], { env: engineEnv, encoding: "utf8", timeout: 30_000 }).trim();
@@ -40,6 +45,8 @@ for (const mode of ["before", "after"] as const) {
     writeFileSync(resolve(output, `${mode}.log`), log);
     const screenshot = spawnSync(podman, ["--connection", machine, "exec", target.containerName, "cat", "/tmp/firefox-proof.png"], { env: engineEnv, timeout: 10_000, maxBuffer: 8 * 1024 * 1024 });
     const png = screenshot.status === 0 && screenshot.stdout.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    let sandbox;
+    let disabledControl;
     if (mode === "before") {
       assert(!png, "Baseline unexpectedly renders: investigate before claiming reproduction");
       assert.match(log, /chroot.*EPERM/);
@@ -48,8 +55,16 @@ for (const mode of ["before", "after"] as const) {
       assert.doesNotMatch(log, /chroot.*EPERM/);
       assert(png, "Patched Firefox must generate an actual PNG with sandbox enabled");
       writeFileSync(resolve(output, "after.png"), screenshot.stdout);
+      const inspectSandbox = (mode: "enabled" | "disabled") => JSON.parse(execFileSync(podman,
+        ["--connection", machine, "exec", "-i", "--user", "cua", target.containerName, "python3", "-", mode],
+        { env: engineEnv, input: sandboxProbe, encoding: "utf8", timeout: 90_000 }).trim());
+      sandbox = inspectSandbox("enabled");
+      assertSandboxEnabled(sandbox);
+      disabledControl = inspectSandbox("disabled");
+      assert.equal(disabledControl.effectiveContentSandboxLevel, 0);
+      assert.throws(() => assertSandboxEnabled(disabledControl), /effective content sandbox/);
     }
-    receipt.push({ mode, image: IMAGE, target: target.containerName, firefoxExit: probe.status, png, chrootEperm: /chroot.*EPERM/.test(log) });
+    receipt.push({ mode, image: IMAGE, target: target.containerName, firefoxExit: probe.status, png, chrootEperm: /chroot.*EPERM/.test(log), sandbox, disabledControl });
     console.log(JSON.stringify(receipt.at(-1)));
   } finally {
     if (created) run(["rm", "-f", target.containerName]);
