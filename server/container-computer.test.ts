@@ -172,8 +172,8 @@ describe("containerComputerStatus", () => {
       UTSMode: "private",
       CgroupnsMode: null,
     };
-    detail.EffectiveCaps = ["CAP_SETGID", "CAP_SETUID"];
-    detail.BoundingCaps = ["CAP_SETGID", "CAP_SETUID"];
+    detail.EffectiveCaps = ["CAP_SETGID", "CAP_SETUID", "CAP_SYS_CHROOT"];
+    detail.BoundingCaps = ["CAP_SETGID", "CAP_SETUID", "CAP_SYS_CHROOT"];
     const targetDriverExec =
       `podman exec -u cua -e HOME=/home/cua -e DISPLAY=:1 -e CUA_DRIVER_INSTALL_CHANNEL=python_package ` +
       `-e CUA_DRIVER_RS_TELEMETRY_ENABLED=0 ${target.containerName} ${CUA_EXECUTABLE}`;
@@ -229,18 +229,22 @@ describe("containerComputerStatus", () => {
     };
     expect(podmanSecurityIsHardened(
       config,
-      ["CAP_SETGID", "CAP_SETUID"],
-      ["CAP_SETGID", "CAP_SETUID"],
+      ["CAP_SETGID", "CAP_SETUID", "CAP_SYS_CHROOT"],
+      ["CAP_SETGID", "CAP_SETUID", "CAP_SYS_CHROOT"],
     )).toBe(true);
+    // Existing two-capability containers must be recreated, not accepted as ready.
+    expect(podmanSecurityIsHardened(
+      config, ["CAP_SETGID", "CAP_SETUID"], ["CAP_SETGID", "CAP_SETUID"],
+    )).toBe(false);
     for (const mode of ["private", "keep-id:uid=1000,gid=1000", "host", "container:other", "keep-id:uid=0,gid=0", "auto"]) {
       expect(podmanSecurityIsHardened(
-        { ...config, UsernsMode: mode }, ["CAP_SETGID", "CAP_SETUID"], ["CAP_SETGID", "CAP_SETUID"],
+        { ...config, UsernsMode: mode }, ["CAP_SETGID", "CAP_SETUID", "CAP_SYS_CHROOT"], ["CAP_SETGID", "CAP_SETUID", "CAP_SYS_CHROOT"],
       )).toBe(mode === "private" || mode === "keep-id:uid=1000,gid=1000");
     }
     expect(podmanSecurityIsHardened(
       config,
-      ["CAP_NET_RAW", "CAP_SETGID", "CAP_SETUID"],
-      ["CAP_SETGID", "CAP_SETUID"],
+      ["CAP_NET_RAW", "CAP_SETGID", "CAP_SETUID", "CAP_SYS_CHROOT"],
+      ["CAP_SETGID", "CAP_SETUID", "CAP_SYS_CHROOT"],
     )).toBe(false);
   });
 
@@ -844,6 +848,10 @@ describe("setupCommands", () => {
 
   it("asks rootless Podman to map and privately relabel the durable workspace", () => {
     const command = setupCommands("podman", "linux").run!;
+    expect(command).toContain("--cap-add SYS_CHROOT");
+    expect(command).not.toContain("--privileged");
+    expect(command).not.toContain("unconfined");
+    expect(setupCommands("docker", "linux").run).not.toContain("SYS_CHROOT");
     expect(command).toContain(
       `--mount type=bind,source=${VM_WORKSPACE_DIR},target=${VM_WORKSPACE_GUEST},relabel=private`,
     );
