@@ -178,7 +178,8 @@ struct ChatListView: View {
             ProfileAvatar(name: session.connection?.name ?? "You", size: 30)
                 .frame(width: 44, height: 44)
                 .glassCapsule(interactive: false)
-                .accessibilityLabel("Connected to \(session.connection?.name ?? "your computer")")
+                .accessibilityLabel(session.connection.map { LocalizedStringKey("Connected to \($0.name)") }
+                    ?? "Connected to your computer")
 
             Spacer(minLength: 8)
 

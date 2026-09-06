@@ -112,7 +112,7 @@ struct TranscriptAttachmentView: View {
     @State private var thumbnail: UIImage?
     @State private var thumbnailLoading = false
     @State private var previewLoading = false
-    @State private var errorMessage: String?
+    @State private var errorMessage: Text?
     @State private var thumbnailAttempt = 0
     @State private var thumbnailVisible = false
     @State private var preview: FilePreviewItem?
@@ -134,7 +134,7 @@ struct TranscriptAttachmentView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .accessibilityHidden(true)
-                    Text(errorMessage)
+                    errorMessage
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 2)
                     Button("Retry", action: retry)
@@ -296,7 +296,7 @@ struct TranscriptAttachmentView: View {
             guard downloaded.data.count <= AttachmentPolicy.maximumImageBytes,
                   AttachmentPolicy.normalizedMIME(downloaded.contentType).hasPrefix("image/")
             else {
-                errorMessage = "This image couldn't be previewed."
+                errorMessage = Text("This image couldn't be previewed.")
                 return
             }
             let decoded = await Task.detached(priority: .userInitiated) {
@@ -304,7 +304,7 @@ struct TranscriptAttachmentView: View {
             }.value
             try Task.checkCancellation()
             guard let image = decoded.value else {
-                errorMessage = "This image couldn't be previewed."
+                errorMessage = Text("This image couldn't be previewed.")
                 return
             }
             thumbnail = UIImage(cgImage: image)
@@ -312,7 +312,7 @@ struct TranscriptAttachmentView: View {
             return
         } catch {
             guard !Task.isCancelled else { return }
-            errorMessage = error.localizedDescription
+            errorMessage = Text(verbatim: error.localizedDescription)
         }
     }
 
@@ -335,7 +335,7 @@ struct TranscriptAttachmentView: View {
                     cacheResult: attachment.kind == .image
                 )
                 guard let item = FilePreviewItem(downloaded: downloaded) else {
-                    errorMessage = "The downloaded file couldn't be previewed."
+                    errorMessage = Text("The downloaded file couldn't be previewed.")
                     return
                 }
                 // Adopt cleanup ownership before observing cancellation. The
@@ -347,7 +347,7 @@ struct TranscriptAttachmentView: View {
                     guard downloaded.data.count <= AttachmentPolicy.maximumImageBytes,
                           AttachmentPolicy.normalizedMIME(downloaded.contentType).hasPrefix("image/")
                     else {
-                        errorMessage = "This image couldn't be previewed."
+                        errorMessage = Text("This image couldn't be previewed.")
                         return
                     }
                     if thumbnail == nil {
@@ -356,7 +356,7 @@ struct TranscriptAttachmentView: View {
                         }.value
                         try Task.checkCancellation()
                         guard decoded.value != nil else {
-                            errorMessage = "This image couldn't be previewed."
+                            errorMessage = Text("This image couldn't be previewed.")
                             return
                         }
                     }
@@ -367,7 +367,7 @@ struct TranscriptAttachmentView: View {
                 return
             } catch {
                 guard !Task.isCancelled else { return }
-                errorMessage = error.localizedDescription
+                errorMessage = Text(verbatim: error.localizedDescription)
             }
         }
     }
@@ -452,7 +452,7 @@ struct FilePreviewItem: Identifiable {
 struct FilePreviewView: View {
     let item: FilePreviewItem
     let close: () -> Void
-    @State private var linkError: String?
+    @State private var linkError: LocalizedStringKey?
 
     var body: some View {
         NavigationStack {

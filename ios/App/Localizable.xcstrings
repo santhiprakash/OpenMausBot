@@ -94,6 +94,26 @@
         }
       }
     },
+    "Add a document from Files": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Adicionar um documento do app Arquivos"
+          }
+        }
+      }
+    },
+    "Add a photo to this message": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Adicionar uma foto a esta mensagem"
+          }
+        }
+      }
+    },
     "Add another account": {
       "localizations": {
         "pt-BR": {
@@ -114,12 +134,42 @@
         }
       }
     },
+    "Add to section": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Adicionar à seção"
+          }
+        }
+      }
+    },
     "Adds to existing section": {
       "localizations": {
         "pt-BR": {
           "stringUnit": {
             "state": "translated",
             "value": "Adiciona a uma seção existente"
+          }
+        }
+      }
+    },
+    "Advanced · %@ run limit": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avançado · limite de execução de %@"
+          }
+        }
+      }
+    },
+    "Advanced · no run limit": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avançado · sem limite de execução"
           }
         }
       }
@@ -444,12 +494,32 @@
         }
       }
     },
+    "Checking Cloud VM availability…": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verificando a disponibilidade da Cloud VM…"
+          }
+        }
+      }
+    },
     "Chips": {
       "localizations": {
         "pt-BR": {
           "stringUnit": {
             "state": "translated",
             "value": "Chips"
+          }
+        }
+      }
+    },
+    "Choose File": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Escolher arquivo"
           }
         }
       }
@@ -504,12 +574,52 @@
         }
       }
     },
+    "Choose bots": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Escolher bots"
+          }
+        }
+      }
+    },
+    "Choose up to 100 bots for one section.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Escolha até 100 bots para uma seção."
+          }
+        }
+      }
+    },
     "Circle": {
       "localizations": {
         "pt-BR": {
           "stringUnit": {
             "state": "translated",
             "value": "Círculo"
+          }
+        }
+      }
+    },
+    "Clear": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Limpar"
+          }
+        }
+      }
+    },
+    "Close": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fechar"
           }
         }
       }
@@ -540,6 +650,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "O status da Cloud VM está indisponível"
+          }
+        }
+      }
+    },
+    "Completed": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Concluída"
           }
         }
       }
@@ -714,6 +834,26 @@
         }
       }
     },
+    "Connected to %@": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Conectado a %@"
+          }
+        }
+      }
+    },
+    "Connected to your computer": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Conectado ao seu computador"
+          }
+        }
+      }
+    },
     "Connecting…": {
       "localizations": {
         "pt-BR": {
@@ -760,6 +900,58 @@
           "stringUnit": {
             "state": "translated",
             "value": "Continuar"
+          }
+        }
+      }
+    },
+    "Continue with %lld bots": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Continue with %lld bot"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Continue with %lld bots"
+                }
+              },
+              "zero": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Continue with %lld bots"
+                }
+              }
+            }
+          }
+        },
+        "pt-BR": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Continuar com %lld bot"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Continuar com %lld bots"
+                }
+              },
+              "zero": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Continuar com %lld bots"
+                }
+              }
+            }
           }
         }
       }
@@ -834,6 +1026,26 @@
         }
       }
     },
+    "Couldn't start the microphone.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Não foi possível iniciar o microfone."
+          }
+        }
+      }
+    },
+    "Couldn't transcribe that.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Não foi possível transcrever isso."
+          }
+        }
+      }
+    },
     "Couldn’t create section": {
       "localizations": {
         "pt-BR": {
@@ -864,6 +1076,16 @@
         }
       }
     },
+    "Create section": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Criar seção"
+          }
+        }
+      }
+    },
     "Creates a new section": {
       "localizations": {
         "pt-BR": {
@@ -880,6 +1102,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Criar ou rotacionar um webhook altera um gatilho acessível pela internet e um segredo de assinatura, então o gerenciamento de webhooks continua no computador pareado. Os recibos de execução de webhook continuam aparecendo acima."
+          }
+        }
+      }
+    },
+    "Creating…": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Criando…"
           }
         }
       }
@@ -964,6 +1196,46 @@
         }
       }
     },
+    "Deleted agent": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agente excluído"
+          }
+        }
+      }
+    },
+    "Dictation isn't available for this language.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "O ditado não está disponível para este idioma."
+          }
+        }
+      }
+    },
+    "Dictation needs Microphone access. Enable it in Settings → OpenMausMobile.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "O ditado precisa de acesso ao Microfone. Ative em Ajustes → OpenMausMobile."
+          }
+        }
+      }
+    },
+    "Dictation needs Speech Recognition access. Enable it in Settings → OpenMausMobile.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "O ditado precisa de acesso ao Reconhecimento de Fala. Ative em Ajustes → OpenMausMobile."
+          }
+        }
+      }
+    },
     "Dismiss": {
       "localizations": {
         "pt-BR": {
@@ -990,6 +1262,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Concluído"
+          }
+        }
+      }
+    },
+    "Double tap to add this bot": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Toque duas vezes para adicionar este bot"
+          }
+        }
+      }
+    },
+    "Double tap to remove this bot": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Toque duas vezes para remover este bot"
           }
         }
       }
@@ -1054,6 +1346,16 @@
         }
       }
     },
+    "Edit routine": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Editar rotina"
+          }
+        }
+      }
+    },
     "ElevenLabs is not configured": {
       "localizations": {
         "pt-BR": {
@@ -1080,6 +1382,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Criptografado e salvo no seu computador"
+          }
+        }
+      }
+    },
+    "Encrypted and sent to your computer.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Criptografado e enviado ao seu computador."
           }
         }
       }
@@ -1113,6 +1425,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Digitar endereço e código"
+          }
+        }
+      }
+    },
+    "Enter it securely on this phone.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Digite com segurança neste telefone."
           }
         }
       }
@@ -1357,6 +1679,16 @@
         }
       }
     },
+    "Idle": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ocioso"
+          }
+        }
+      }
+    },
     "Inspect latest git changes and patches": {
       "localizations": {
         "pt-BR": {
@@ -1373,6 +1705,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Sessão VNC interativa. O acesso precisa estar ativado para este dispositivo nos ajustes de Telefone do Mac."
+          }
+        }
+      }
+    },
+    "Interrupt": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Interromper"
           }
         }
       }
@@ -1423,6 +1765,46 @@
           "stringUnit": {
             "state": "translated",
             "value": "Carregando modelos"
+          }
+        }
+      }
+    },
+    "Loads the image preview": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Carrega a pré-visualização da imagem"
+          }
+        }
+      }
+    },
+    "Local Network access is off. Enable it in Settings, or enter a Tailscale address below.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "O acesso à Rede Local está desativado. Ative nos Ajustes, ou digite um endereço Tailscale abaixo."
+          }
+        }
+      }
+    },
+    "Local discovery isn't available right now. Enter the address shown in Phone settings.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A descoberta local não está disponível agora. Digite o endereço mostrado nos ajustes de Telefone."
+          }
+        }
+      }
+    },
+    "Local discovery was interrupted. Retrying…": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A descoberta local foi interrompida. Tentando de novo…"
           }
         }
       }
@@ -1487,12 +1869,42 @@
         }
       }
     },
+    "Model, profile, voice and notifications": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Modelo, perfil, voz e notificações"
+          }
+        }
+      }
+    },
+    "More": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mais"
+          }
+        }
+      }
+    },
     "Name": {
       "localizations": {
         "pt-BR": {
           "stringUnit": {
             "state": "translated",
             "value": "Nome"
+          }
+        }
+      }
+    },
+    "Name section": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nomear a seção"
           }
         }
       }
@@ -1757,6 +2169,16 @@
         }
       }
     },
+    "Not provided.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Não informado."
+          }
+        }
+      }
+    },
     "Nothing matches": {
       "localizations": {
         "pt-BR": {
@@ -1947,6 +2369,16 @@
         }
       }
     },
+    "Open links to other computer files from the original chat message.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Abra links para outros arquivos do computador pela mensagem original da conversa."
+          }
+        }
+      }
+    },
     "Open live cloud desktop": {
       "localizations": {
         "pt-BR": {
@@ -2010,6 +2442,16 @@
         }
       }
     },
+    "Opening…": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Abrindo…"
+          }
+        }
+      }
+    },
     "Opens a preview": {
       "localizations": {
         "pt-BR": {
@@ -2026,6 +2468,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Abre os Ajustes do dispositivo"
+          }
+        }
+      }
+    },
+    "Opens the image full screen": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Abre a imagem em tela cheia"
           }
         }
       }
@@ -2080,6 +2532,16 @@
         }
       }
     },
+    "Pair again by QR code, or finish on your computer.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pareie de novo por QR code, ou conclua no seu computador."
+          }
+        }
+      }
+    },
     "Pair again to enter here": {
       "localizations": {
         "pt-BR": {
@@ -2106,6 +2568,36 @@
           "stringUnit": {
             "state": "translated",
             "value": "Os recibos de execuções anteriores continuam disponíveis."
+          }
+        }
+      }
+    },
+    "Pause": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pausar"
+          }
+        }
+      }
+    },
+    "Paused": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pausada"
+          }
+        }
+      }
+    },
+    "Photo Library": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fototeca"
           }
         }
       }
@@ -2172,6 +2664,26 @@
     },
     "Português (Brasil)": {
       "shouldTranslate": false
+    },
+    "Preparing attachments…": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preparando anexos…"
+          }
+        }
+      }
+    },
+    "Preview": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Prévia"
+          }
+        }
+      }
     },
     "Preview voice": {
       "localizations": {
@@ -2423,6 +2935,26 @@
         }
       }
     },
+    "Resume": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retomar"
+          }
+        }
+      }
+    },
+    "Resuming…": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retomando…"
+          }
+        }
+      }
+    },
     "Retry": {
       "localizations": {
         "pt-BR": {
@@ -2553,6 +3085,26 @@
         }
       }
     },
+    "Runs every": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Roda a cada"
+          }
+        }
+      }
+    },
+    "Runs on": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Roda em"
+          }
+        }
+      }
+    },
     "Runs the agent and its tools inside its Box virtual machine. The VM wakes automatically for each run; keep OpenMausBot running so its scheduler can launch the job.": {
       "localizations": {
         "pt-BR": {
@@ -2589,6 +3141,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Salvar alterações do perfil"
+          }
+        }
+      }
+    },
+    "Saved securely on your computer.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Salvo com segurança no seu computador."
+          }
+        }
+      }
+    },
+    "Saved securely. The task resumed.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Salvo com segurança. A tarefa retomou."
           }
         }
       }
@@ -2703,6 +3275,16 @@
         }
       }
     },
+    "Select all": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Selecionar todos"
+          }
+        }
+      }
+    },
     "Selected days": {
       "localizations": {
         "pt-BR": {
@@ -2719,6 +3301,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Enviar"
+          }
+        }
+      }
+    },
+    "Sending…": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enviando…"
           }
         }
       }
@@ -2749,6 +3341,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Forma"
+          }
+        }
+      }
+    },
+    "Share as JSON": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compartilhar como JSON"
+          }
+        }
+      }
+    },
+    "Share transcript": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compartilhar a transcrição"
           }
         }
       }
@@ -2823,6 +3435,26 @@
         }
       }
     },
+    "Source: %@": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Origem: %@"
+          }
+        }
+      }
+    },
+    "Source: unknown": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Origem: desconhecida"
+          }
+        }
+      }
+    },
     "Speak replies": {
       "localizations": {
         "pt-BR": {
@@ -2839,6 +3471,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Quadrado"
+          }
+        }
+      }
+    },
+    "Start dictation": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Iniciar o ditado"
           }
         }
       }
@@ -2873,6 +3515,16 @@
         }
       }
     },
+    "Stop dictation": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Parar o ditado"
+          }
+        }
+      }
+    },
     "Stop if still running after": {
       "localizations": {
         "pt-BR": {
@@ -2883,12 +3535,32 @@
         }
       }
     },
+    "Stop the current turn": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Parar o turno atual"
+          }
+        }
+      }
+    },
     "Stop this bot before changing its model.": {
       "localizations": {
         "pt-BR": {
           "stringUnit": {
             "state": "translated",
             "value": "Pare este bot antes de mudar o modelo dele."
+          }
+        }
+      }
+    },
+    "Structured transcript data": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dados estruturados da transcrição"
           }
         }
       }
@@ -2919,6 +3591,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Mude para Acesso seguro pelo telefone (HTTPS) ou Tailscale e tente de novo. Você ainda pode concluir esta solicitação no seu computador."
+          }
+        }
+      }
+    },
+    "Switch, rename or remove one": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Trocar, renomear ou remover uma"
           }
         }
       }
@@ -2969,6 +3651,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Toque nos bots um a um, ou segure e deslize pela grade."
+          }
+        }
+      }
+    },
+    "Tap to preview": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Toque para pré-visualizar"
           }
         }
       }
@@ -3053,6 +3745,16 @@
         }
       }
     },
+    "That link couldn't be opened.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Não foi possível abrir esse link."
+          }
+        }
+      }
+    },
     "The authorization page could not be opened. Try again after checking your browser restrictions.": {
       "localizations": {
         "pt-BR": {
@@ -3093,6 +3795,16 @@
         }
       }
     },
+    "The downloaded file couldn't be previewed.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Não foi possível pré-visualizar o arquivo baixado."
+          }
+        }
+      }
+    },
     "The generated audio could not be played.": {
       "localizations": {
         "pt-BR": {
@@ -3129,6 +3841,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "O computador deste bot só é capturado enquanto ele está trabalhando."
+          }
+        }
+      }
+    },
+    "This chat as Markdown": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Esta conversa em Markdown"
           }
         }
       }
@@ -3219,6 +3941,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Isto dá a este dispositivo controle total do computador na nuvem, incluindo tudo que estiver conectado dentro dele."
+          }
+        }
+      }
+    },
+    "This image couldn't be previewed.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Não foi possível pré-visualizar esta imagem."
           }
         }
       }
@@ -3393,12 +4125,32 @@
         }
       }
     },
+    "Try again.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tente de novo."
+          }
+        }
+      }
+    },
     "Try reconnecting": {
       "localizations": {
         "pt-BR": {
           "stringUnit": {
             "state": "translated",
             "value": "Tentar reconectar"
+          }
+        }
+      }
+    },
+    "Try resuming the task": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tentar retomar a tarefa"
           }
         }
       }
@@ -3479,6 +4231,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Usar mascote"
+          }
+        }
+      }
+    },
+    "Use secure phone access or Tailscale, or finish on your computer.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use o acesso seguro pelo telefone ou o Tailscale, ou conclua no seu computador."
           }
         }
       }
@@ -3569,6 +4331,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Esperando por você"
+          }
+        }
+      }
+    },
+    "Watch computer": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ver o computador"
           }
         }
       }
@@ -3779,6 +4551,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "O seu computador não conseguiu abrir o cofre de credenciais, então não sabe dizer quais contas estão conectadas. Nada foi desconectado — reiniciar o OpenMausBot no seu computador costuma resolver."
+          }
+        }
+      }
+    },
+    "a custom interval": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "um intervalo personalizado"
           }
         }
       }
