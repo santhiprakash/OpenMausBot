@@ -3,6 +3,11 @@
 Related: #430. This change gives a room member its configured Local VM; it does
 not create a room-owned desktop or a room Computer panel.
 
+The pre-existing direct-turn stale lease after a missing terminal event is
+tracked separately in [#860](https://github.com/milind-soni/OpenMausBot/issues/860).
+That follow-up needs distinct direct invocation identities and tests protecting
+a replacement turn from an old watchdog callback; it is outside this room slice.
+
 `runGroupMemberTurn` now mounts the speaking bot's computer MCP and prompt after
 claiming the same target-scoped lease used by direct turns. Setup cancellation
 and terminal cleanup release the lease and setup ownership. Timed-out or stalled
@@ -32,7 +37,7 @@ revocation of each settled speaker's computer capability. It is written to
 The script removes the previous dump before every send and requires every Goal,
 including computer-off, to settle. Cleanup errors fail the run.
 
-2026-09-06 on Windows/WSL2, rootless Podman 5.8.3:
+2026-09-07 on Windows/WSL2, rootless Podman 5.8.3:
 
 - Two Goal speakers received different matching desktop targets and settled.
 - A speaker switched to `computer: off` received no computer MCP.
@@ -42,12 +47,15 @@ including computer-off, to settle. Cleanup errors fail the run.
   member handoff/impersonation, lease expiry, timeout, and stall cleanup.
 - Before the follow-up fix, the same readiness, expiry, and timeout regressions
   failed on `a9ec061c`; after the fix they pass.
-- Goal orchestration, bounded waits, lease, and fixture-launcher tests also run.
+- After integrating upstream browser engine step 2 (`b3c2f74b`): Goal, browser,
+  lease, and fixture-launcher coverage passed 68 tests with 1 existing TODO.
+  The dedicated real-server browser-engine room-mount test also passed.
 - Server TypeScript checking and server bundling passed.
 
 This fake-engine fixture proves routing, not model-driven clicks or screen
 streaming. Firefox sandbox compatibility and Japanese guest fonts are separate
-changes. The full repository test suite was not repeated for this change.
+changes. Full repository coverage is provided by PR CI; this local recipe is
+targeted.
 
 Run the regression coverage without a container engine:
 
