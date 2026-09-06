@@ -59,6 +59,11 @@ export interface OptionCardData {
    * approvalHeldReason, or a delivery/apply error from a routine or profile
    * request. Free text either way, so it is shown verbatim. */
   held?: string;
+  /** Catalog key for `held` when it is one of the fixed notes, so the client
+   * shows it in the reader's language. Absent on an apply error (free text
+   * with no key) and on every card saved before this field existed, which is
+   * why `held` still carries the English. */
+  heldCode?: string;
   /** the narrow grant "always allow" remembers, e.g. "Bash:git" */
   allowKey?: string;
   /** Local actions never share remembered grants with cloud/tool approvals. */

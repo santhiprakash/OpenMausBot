@@ -7,7 +7,7 @@
 import { Check, ShieldCheck, X } from "lucide-react";
 import { type Bot, type Message } from "@/state/store";
 import { cn } from "@/lib/cn";
-import { t } from "@/lib/i18n";
+import { t, tFromServer } from "@/lib/i18n";
 import type { LocaleKey } from "@/locales";
 import { SkillRequestPreview } from "@/components/SkillRequestPreview";
 
@@ -67,6 +67,7 @@ export function ApprovalCard({
   const isProfileRequest = Boolean(card.profileRequest);
   const routineAction = card.routineRequest?.operation.action;
   const skillAction = card.skillRequest?.action;
+  const heldNote = tFromServer(card.heldCode, card.held);
   const routineSettledLabel = routineAction ? t(ROUTINE_SETTLED_LABEL[routineAction]) : undefined;
   const skillSettledLabel = skillAction ? t(SKILL_SETTLED_LABEL[skillAction]) : undefined;
   const displayTool = isRoutineRequest
@@ -128,9 +129,9 @@ export function ApprovalCard({
 
       {card.skillRequest && <SkillRequestPreview request={card.skillRequest} />}
 
-      {card.held && (
+      {heldNote && (
         <div className="mt-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-[12.5px] text-warning">
-          {card.held}
+          {heldNote}
         </div>
       )}
 

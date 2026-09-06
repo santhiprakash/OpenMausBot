@@ -10,7 +10,7 @@
 import { memo } from "react";
 import { useStore, type Bot, type Message } from "@/state/store";
 import { cn } from "@/lib/cn";
-import { t } from "@/lib/i18n";
+import { t, tFromServer } from "@/lib/i18n";
 import type { LocaleKey } from "@/locales";
 import { SkillRequestPreview } from "@/components/SkillRequestPreview";
 import { reviewedSkillSha256 } from "../../shared/skill-request";
@@ -27,6 +27,7 @@ export interface Pending {
   allowKey?: string;
   detail: string;
   held?: string;
+  heldCode?: string;
 }
 
 /** The persisted payload is the authoritative marker. Tool names are
@@ -54,6 +55,7 @@ export function pendingApprovals(messages: Message[]): Pending[] {
       allowKey: m.card!.allowKey,
       detail: m.card!.subtitle,
       held: m.card!.held,
+      heldCode: m.card!.heldCode,
     }));
 }
 
@@ -127,6 +129,7 @@ export const PendingApprovalPanel = memo(function PendingApprovalPanel({
   count: number;
   index: number;
 }) {
+  const heldNote = tFromServer(pending.heldCode, pending.held);
   return (
     <div
       role="region"
@@ -182,7 +185,7 @@ export const PendingApprovalPanel = memo(function PendingApprovalPanel({
       {pending.message.card?.skillRequest && (
         <SkillRequestPreview request={pending.message.card.skillRequest} />
       )}
-      {pending.held && <div className="mt-2 text-[12px] text-warning">{pending.held}</div>}
+      {heldNote && <div className="mt-2 text-[12px] text-warning">{heldNote}</div>}
     </div>
   );
 });

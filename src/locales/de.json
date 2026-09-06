@@ -79,5 +79,15 @@
   "approval.action.update": "Aktualisieren",
   "approval.action.enable": "Aktivieren",
   "approval.action.confirm": "Bestätigen",
-  "approval.action.allowOnce": "Einmal erlauben"
+  "approval.action.allowOnce": "Einmal erlauben",
+  "approval.held.native": "Der Anbieter verlangt für diese Aktion deine Freigabe.",
+  "approval.held.sandbox": "Das ändert die Sandbox des Anbieters, deshalb kann nur Full access es automatisch genehmigen.",
+  "approval.held.localComputer": "Die Steuerung deines Computers deckt „Immer erlauben“ nie ab, deshalb musst du hier entscheiden.",
+  "approval.held.unattended": "Ein Webhook oder ein anderer Bot hat diesen Durchlauf gestartet, deshalb ist Approve for me pausiert und jede Aktion fragt nach.",
+  "approval.held.unattendedFullAccess": "Ein Webhook oder ein anderer Bot hat diesen Durchlauf gestartet, deshalb ist Approve for me pausiert und jede Aktion fragt nach. Full access läuft unbeaufsichtigt weiter.",
+  "approval.held.destructive": "Das sieht destruktiv aus, deshalb hat Approve for me nachgefragt.",
+  "approval.held.sensitive": "Das betrifft Zugangsdaten, deshalb hat Approve for me nachgefragt.",
+  "approval.held.needsYou": "Diese Aktion braucht dich, deshalb hat Approve for me nachgefragt.",
+  "approval.held.undeliveredFull": "Full access konnte diese Freigabe nicht zustellen.",
+  "approval.held.undelivered": "Approve for me konnte diese Anfrage nicht beantworten."
 }
