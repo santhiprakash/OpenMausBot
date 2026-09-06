@@ -17,6 +17,7 @@ import {
   type ApprovalBus,
 } from "./peer-approval.ts";
 import { closeMessageDb } from "./message-db.ts";
+import type { Notification } from "./notify.ts";
 import { Store, type BotRecord } from "./store.ts";
 
 const selection = (): ModelSelection => ({ instanceId: "claude", model: "fake-model" });
@@ -67,6 +68,61 @@ describe("peer approval card lifecycle", () => {
     resolvePeerComms(bus, card.card!.requestId!, "deny");
     expect(await verdict).toBe("deny");
     expect(store.messagesFor(from.threadId).find((m) => m.id === card.id)?.card?.answered).toBe("deny");
+  });
+
+  // The card is the one bot-to-bot event that blocks on a person. Everything
+  // else a hop does is deliberately silent; this must not be.
+  it("tells the person the bot is waiting on them: a waiting state and a notification", async () => {
+    const frames: Array<Notification | null> = [];
+    bus = { store, broadcast: () => {}, notify: (frame) => frames.push(frame) };
+    store.setActivity(from.id, "working"); // mid-turn, the way ask_bot always is
+
+    const verdict = requestPeerApproval(bus, from, target, "Helper, can you take the deploy?", "ask_bot");
+    const card = pendingCard(store, from)!;
+
+    expect(store.bot(from.id)?.activity).toBe("waiting-on-you");
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({
+      kind: "approval",
+      botId: from.id,
+      threadId: from.threadId,
+      title: "Asker needs approval",
+    });
+    expect(frames[0]?.body).toContain("@Asker wants to contact @Helper");
+    expect(frames[0]?.body).toContain("Helper, can you take the deploy?");
+
+    // answered: the turn is working again, and nothing buzzes twice
+    resolvePeerComms(bus, card.card!.requestId!, "allow");
+    expect(await verdict).toBe("allow");
+    expect(store.bot(from.id)?.activity).toBe("working");
+    expect(frames).toHaveLength(1);
+  });
+
+  it("aims the notification at the room when the card is raised there", () => {
+    const frames: Array<Notification | null> = [];
+    bus = { store, broadcast: () => {}, notify: (frame) => frames.push(frame) };
+    const room = store.createGroup("Standup", [from.id, target.id], false);
+
+    void requestPeerApproval(bus, from, target, "ping", "post_to_room", room.threadId);
+
+    expect(frames[0]).toMatchObject({
+      kind: "approval",
+      threadId: room.threadId,
+      groupId: room.id,
+      title: "Asker in Standup needs approval",
+    });
+    cancelPeerApprovalsForThread(room.threadId);
+  });
+
+  it("stays quiet when a standing grant answers without a card", async () => {
+    const frames: Array<Notification | null> = [];
+    bus = { store, broadcast: () => {}, notify: (frame) => frames.push(frame) };
+    store.patchBot(from.id, { alwaysAllow: [peerAllowKey("ask_bot", target.id)] });
+    store.setActivity(from.id, "working");
+
+    await expect(requestPeerApproval(bus, from, target, "ping", "ask_bot")).resolves.toBe("allow");
+    expect(frames).toEqual([]);
+    expect(store.bot(from.id)?.activity).toBe("working");
   });
 
   it("answers an unknown requestId as not-ours, so provider cards still route", () => {
@@ -153,6 +209,48 @@ describe("peer approval card lifecycle", () => {
     expect(
       store.messagesFor(background.threadId).find((message) => message.id === orphan.id)?.card?.dismissed,
     ).toBe(true);
+  });
+
+  it("dismisses a stale card left in a room's thread, not just a bot's", () => {
+    // post_to_room and ask_bot both run from a room turn, and the card goes
+    // into the thread the caller is speaking from — the room's. Quitting the
+    // app with one open used to leave that room's composer blocked forever.
+    const room = store.createGroup("Standup", [from.id, target.id]);
+    const orphan = store.appendMessage(room.threadId, {
+      role: "bot",
+      kind: "options",
+      card: {
+        title: "@Asker wants to post in “Standup”",
+        subtitle: "deploy is green",
+        options: ["Allow", "Deny"],
+        requestId: "room-card-from-a-dead-process",
+        tool: "post_to_room",
+      },
+    });
+
+    expect(dismissStalePeerCards(bus)).toBe(1);
+    const settled = store.messagesFor(room.threadId).find((message) => message.id === orphan.id);
+    expect(settled?.card?.dismissed, "a room's composer stayed blocked after a restart").toBe(true);
+    expect(settled?.card?.answered).toBe("deny");
+    expect(dismissStalePeerCards(bus)).toBe(0);
+  });
+
+  it("dismisses a stale card left in a room's background task thread", () => {
+    const room = store.createGroup("Release", [from.id, target.id]);
+    const task = store.createGroupTask(room.id, "Cut 1.2", false)!;
+    store.appendMessage(task.threadId, {
+      role: "bot",
+      kind: "options",
+      card: {
+        title: "@Asker wants to contact @Helper",
+        subtitle: "ping",
+        options: ["Allow", "Deny"],
+        requestId: "room-task-card-from-a-dead-process",
+        tool: "ask_bot",
+      },
+    });
+
+    expect(dismissStalePeerCards(bus)).toBe(1);
   });
 
   it("leaves a live card alone at boot", async () => {

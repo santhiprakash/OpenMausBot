@@ -6,6 +6,16 @@ final class ProfileRoutinePolicyTests: XCTestCase {
         let now = Date(timeIntervalSince1970: 2_000)
 
         XCTAssertTrue(routine(schedule: .daily(time: "09:00", weekdays: [1])).canToggle(at: now))
+        XCTAssertTrue(
+            routine(schedule: .interval(everyMinutes: 5, anchorAt: now.addingTimeInterval(-3_600)))
+                .canToggle(at: now),
+            "an interval remains resumable after its anchor because future occurrences still exist"
+        )
+        XCTAssertFalse(
+            routine(schedule: .init(type: .interval, everyMinutes: 4, anchorAt: 1_000))
+                .canToggle(at: now),
+            "a malformed interval must not become toggleable merely because its type is known"
+        )
         XCTAssertTrue(routine(schedule: .once(at: now.addingTimeInterval(1))).canToggle(at: now))
         XCTAssertFalse(routine(schedule: .once(at: now)).canToggle(at: now))
         XCTAssertFalse(routine(schedule: .once(at: now.addingTimeInterval(-1))).canToggle(at: now))
@@ -98,6 +108,7 @@ final class ProfileRoutinePolicyTests: XCTestCase {
             enabled: false,
             schedule: schedule,
             durationMinutes: 30,
+            timeoutMinutes: nil,
             nextRunAt: nil,
             createdAt: 1,
             updatedAt: 1

@@ -56,6 +56,27 @@ final class DecodingTests: XCTestCase {
         XCTAssertNil(fleet.bots.first?.hasMore)
     }
 
+    func testDecodesABotOverview() throws {
+        let overview = try decode(BotOverview.self, "bot-overview")
+        XCTAssertEqual(overview.who.name, "Kiwi")
+        XCTAssertEqual(overview.who.soulLead, "File bugs.")
+        XCTAssertFalse(overview.does.isEmpty)
+        XCTAssertFalse(overview.wont.isEmpty)
+        XCTAssertFalse(overview.recent.isEmpty)
+    }
+
+    func testStorePreviewRemainsADecodableFleet() throws {
+        let iosDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let data = try Data(contentsOf: iosDirectory.appendingPathComponent("App/StorePreview.json"))
+        let fleet = try JSONDecoder().decode(Fleet.self, from: data)
+
+        XCTAssertFalse(fleet.bots.isEmpty)
+        XCTAssertFalse(fleet.groups.isEmpty)
+    }
+
     func testOldAndNewAvatarProfilesDecodeTogether() throws {
         let oldBot = try XCTUnwrap(decode(Fleet.self, "bots-full").bots.first)
         XCTAssertNil(oldBot.avatarUrl)
@@ -86,6 +107,20 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(schedule.type, .unknown)
         XCTAssertEqual(schedule.time, "09:00")
         XCTAssertEqual(schedule.weekdays, [1])
+    }
+
+    func testDecodesAnIntervalRoutineSchedule() throws {
+        let schedule = try JSONDecoder().decode(
+            RoutineSchedule.self,
+            from: Data(#"{"type":"interval","everyMinutes":5,"anchorAt":1788384600000}"#.utf8)
+        )
+
+        XCTAssertEqual(schedule.type, .interval)
+        XCTAssertEqual(schedule.everyMinutes, 5)
+        XCTAssertEqual(schedule.anchorAt, 1_788_384_600_000)
+        XCTAssertNil(schedule.at)
+        XCTAssertNil(schedule.time)
+        XCTAssertNil(schedule.weekdays)
     }
 
     func testNotificationTargetRequiresBothExactIds() {
@@ -129,6 +164,33 @@ final class DecodingTests: XCTestCase {
         let fleet = try JSONDecoder().decode(Fleet.self, from: Data(json.utf8))
         XCTAssertEqual(fleet.bots.first?.cloudBackend, "vps")
         XCTAssertNil(fleet.bots.last?.cloudBackend)
+    }
+
+    func testDecodesSidebarSectionsOnBotsAndChannels() throws {
+        let json = """
+        {
+          "bots": [
+            {
+              "id":"b1","threadId":"t1","name":"Scout","title":"","description":"",
+              "notifications":true,"color":"green","unread":false,"section":"Research",
+              "modelSelection":{"instanceId":"i1","model":"m1"},"createdAt":1
+            }
+          ],
+          "groups": [
+            {
+              "id":"g1","threadId":"gt1","name":"Launch","memberIds":["b1"],
+              "defaultResponder":{"kind":"mentions"},"bulletin":"","unread":false,
+              "createdAt":2,"section":"Research"
+            }
+          ]
+        }
+        """
+        let fleet = try JSONDecoder().decode(Fleet.self, from: Data(json.utf8))
+
+        XCTAssertEqual(fleet.bots.first?.section, "Research")
+        XCTAssertEqual(fleet.groups.first?.section, "Research")
+        XCTAssertNil(try decode(Fleet.self, "bots-full").bots.first?.section,
+                     "older computers that omit sections remain compatible")
     }
 
     func testDecodesMultipleConnectedAccountsAndNoAuthToolkit() throws {
@@ -254,6 +316,54 @@ final class DecodingTests: XCTestCase {
         XCTAssertFalse(card.isPermission)
     }
 
+    func testDecodesADirectCredentialRequestWithoutSenderMetadata() throws {
+        let json = """
+        {
+          "id": "secret-1", "role": "bot", "kind": "secret", "at": 1786742413762,
+          "text": "Complete this credential request securely on your computer.",
+          "secret": {
+            "target": "ttsKey", "label": "ElevenLabs API key",
+            "description": "Enables text-to-speech voices in calls.",
+            "placeholder": "Paste your ElevenLabs API key",
+            "helpUrl": "https://elevenlabs.io/app/settings/api-keys",
+            "requestKey": "request-key-1"
+          }
+        }
+        """
+        let message = try JSONDecoder().decode(Message.self, from: Data(json.utf8))
+
+        XCTAssertEqual(message.kind, .secret)
+        XCTAssertNil(message.from, "a direct chat gets its bot identity from the enclosing chat")
+        XCTAssertEqual(message.secret?.target, "ttsKey")
+        XCTAssertEqual(message.secret?.label, "ElevenLabs API key")
+        XCTAssertEqual(message.secret?.requestKey, "request-key-1")
+        XCTAssertTrue(try XCTUnwrap(message.secret).isPending)
+        XCTAssertEqual(previewText(of: message), "ElevenLabs API key")
+    }
+
+    func testDecodesAChannelCredentialRequestWithItsSender() throws {
+        let json = """
+        {
+          "id": "secret-2", "role": "bot", "kind": "secret", "at": 1786742413762,
+          "from": {"botId": "bot-2", "name": "Robyn", "color": "purple"},
+          "secret": {
+            "target": "ttsKey", "label": "ElevenLabs API key",
+            "description": "Enables voices.", "placeholder": "Paste key",
+            "helpUrl": "https://elevenlabs.io/app/settings/api-keys",
+            "requestKey": "request-key-2", "provided": true, "resumed": true
+          }
+        }
+        """
+        let message = try JSONDecoder().decode(Message.self, from: Data(json.utf8))
+
+        XCTAssertEqual(message.kind, .secret)
+        XCTAssertEqual(message.from?.botId, "bot-2")
+        XCTAssertEqual(message.from?.name, "Robyn")
+        XCTAssertFalse(try XCTUnwrap(message.secret).isPending)
+        XCTAssertEqual(message.secret?.provided, true)
+        XCTAssertEqual(message.secret?.resumed, true)
+    }
+
     func testAPendingApprovalIsActionableAndAnAnsweredOneIsNot() throws {
         // The shape a live permission request takes, which the fixture rig
         // cannot produce without a real provider attached.
@@ -277,6 +387,8 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(card.responseBehavior(for: "Always allow"), "allow")
         XCTAssertEqual(card.responseBehavior(for: "Deny"), "deny")
         XCTAssertEqual(card.responseBehavior(for: " deny "), "deny")
+        XCTAssertEqual(card.responseBehavior(for: "Cancel"), "deny")
+        XCTAssertEqual(card.responseBehavior(for: "Dismiss"), "deny")
         XCTAssertTrue(card.shouldRememberPermission(for: "Always allow"))
         XCTAssertFalse(card.shouldRememberPermission(for: "Allow"))
         XCTAssertFalse(card.shouldRememberPermission(for: " deny "))
@@ -288,6 +400,75 @@ final class DecodingTests: XCTestCase {
         var dismissed = card
         dismissed.dismissed = true
         XCTAssertFalse(dismissed.isPending)
+    }
+
+    func testDecodesAReviewedSkillRequest() throws {
+        let json = """
+        {
+          "id": "skill-card", "role": "bot", "kind": "options", "at": 1786742413762,
+          "card": {
+            "title": "Enable skill?", "subtitle": "Files expenses.",
+            "options": ["Enable", "Deny"], "requestId": "req-skill", "tool": "stage_skill",
+            "skillRequest": {
+              "version": 1, "requestId": "req-skill", "botId": "bot-1", "threadId": "thread-1",
+              "stagedId": "staged-1", "action": "create", "name": "file-expense",
+              "gist": "Files expenses.", "source": "learn:conversation",
+              "preview": "---\\nname: file-expense\\n---\\n", "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "warnings": [],
+              "createdAt": 1786742413762
+            }
+          }
+        }
+        """
+        let card = try XCTUnwrap(try JSONDecoder().decode(Message.self, from: Data(json.utf8)).card)
+        XCTAssertEqual(card.skillRequest?.name, "file-expense")
+        XCTAssertEqual(card.skillRequest?.source, "learn:conversation")
+        XCTAssertEqual(card.skillRequest?.reviewedSha256, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789")
+        XCTAssertEqual(card.responseBehavior(for: "Enable"), "allow")
+        XCTAssertEqual(card.responseBehavior(for: "Deny"), "deny")
+    }
+
+    func testDecodesAReviewedSkillUpdate() throws {
+        let json = """
+        {
+          "id": "skill-update", "role": "bot", "kind": "options", "at": 1786742413762,
+          "card": {
+            "title": "Update skill?", "subtitle": "Refreshes verification steps.",
+            "options": ["Update", "Deny"], "requestId": "req-update", "tool": "stage_skill",
+            "skillRequest": {
+              "version": 1, "requestId": "req-update", "botId": "bot-1", "threadId": "thread-1",
+              "stagedId": "staged-update", "action": "update", "name": "verify-app",
+              "gist": "Refreshes verification steps.", "source": "learn:maintenance",
+              "preview": "---\\nname: verify-app\\n---\\n", "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "warnings": [],
+              "createdAt": 1786742413762
+            }
+          }
+        }
+        """
+        let card = try XCTUnwrap(try JSONDecoder().decode(Message.self, from: Data(json.utf8)).card)
+        XCTAssertEqual(card.skillRequest?.action, "update")
+        XCTAssertEqual(card.responseBehavior(for: "Update"), "allow")
+        XCTAssertEqual(card.responseBehavior(for: "Deny"), "deny")
+    }
+
+    func testOldSkillCardStillDecodesButCannotBeApproved() throws {
+        let json = """
+        {
+          "id": "legacy-skill", "role": "bot", "kind": "options", "at": 1786742413762,
+          "card": {
+            "title": "Enable skill?", "subtitle": "Old proposal.",
+            "options": ["Enable", "Dismiss"], "requestId": "req-old", "tool": "stage_skill",
+            "skillRequest": {
+              "version": 1, "requestId": "req-old", "botId": "bot-1", "threadId": "thread-1",
+              "stagedId": "staged-old", "action": "create", "name": "old-skill",
+              "gist": "Old proposal.", "warnings": [], "createdAt": 1786742413762
+            }
+          }
+        }
+        """
+        let card = try XCTUnwrap(try JSONDecoder().decode(Message.self, from: Data(json.utf8)).card)
+        XCTAssertEqual(card.skillRequest?.name, "old-skill")
+        XCTAssertNil(card.skillRequest?.reviewedSha256)
+        XCTAssertEqual(card.responseBehavior(for: "Dismiss"), "deny")
     }
 
     func testAQuestionSendsItsChoiceAsAnAnswer() throws {

@@ -24,6 +24,10 @@ export interface ControlOptions {
   devices: DeviceRegistry;
   /** Where a phone connects — for display, and for the pairing instructions. */
   companionPort: number;
+  /** HPKE recipient public key displayed in pairing QRs. Public by design;
+   * the matching private key never leaves Electron's encrypted store and
+   * private utility-process channel. */
+  secretPublicKey?: () => string | null;
   /** Stable HTTPS route provisioned for this computer, when available. */
   hostedUrl?: () => string | null;
   /** Electron alone uses this to publish a route after its connector health
@@ -33,8 +37,12 @@ export interface ControlOptions {
   discovery: () => { advertising: boolean; name: string };
   /** Device ids with at least one live authenticated event stream. */
   connectedDeviceIds?: () => string[];
-  /** Terminate every authenticated event stream owned by a revoked device. */
+  /** Terminate every authenticated event stream and viewer relay session
+   * owned by a device whose access changed or was revoked. */
   disconnectDevice?: (deviceId: string) => void;
+  /** Re-read Tailscale after the sidecar has started. People commonly install,
+   * sign in, or enable Tailscale while OpenMausBot is already running. */
+  refreshTailscale?: () => Promise<void>;
 }
 
 /** The host out of a `Host` header, port removed.
@@ -173,6 +181,7 @@ export function companionState(options: ControlOptions) {
   const tailscale = tailscaleAddress(addresses);
   const name = tailnetName();
   const pairing = options.devices.pairing();
+  const secretPublicKey = options.secretPublicKey?.() ?? null;
   return {
     // Whoever starts this sidecar as a child process needs to be able to tell
     // it apart from an unrelated one that got to the control port first. An
@@ -194,6 +203,7 @@ export function companionState(options: ControlOptions) {
       name,
       currentHostedUrl(options),
     ),
+    ...(secretPublicKey ? { secretPublicKey } : {}),
     pairing: pairing ? { code: pairing.code, token: pairing.token, expiresAt: pairing.expiresAt } : null,
     devices: options.devices.list(),
     connectedDeviceIds: options.connectedDeviceIds?.() ?? [],
@@ -259,6 +269,13 @@ export function createControlServer(options: ControlOptions): Server {
       return res.end(html);
     }
     if (method === "GET" && path === "/state") return json(res, 200, companionState(options));
+    if (method === "POST" && path === "/tailscale/refresh" && options.refreshTailscale) {
+      void options.refreshTailscale().then(
+        () => json(res, 200, companionState(options)),
+        () => json(res, 500, { error: "could not refresh Tailscale" }),
+      );
+      return;
+    }
     if (method === "POST" && path === "/pairing") {
       const window = options.devices.openPairing();
       // Keep the freshly issued credentials at the top level as well as in
@@ -300,6 +317,7 @@ export function createControlServer(options: ControlOptions): Server {
       } catch {
         return json(res, 500, { error: "could not save cloud desktop access" });
       }
+      options.disconnectDevice?.(cloudDesktop[1]);
       return json(res, 200, companionState(options));
     }
     const revoke = path.match(/^\/devices\/([\w-]+)$/);

@@ -140,7 +140,9 @@ private struct RoutineRow: View {
             else { Image(systemName: "calendar.badge.exclamationmark").frame(width: 42, height: 42) }
             VStack(alignment: .leading, spacing: 3) {
                 Text(routine.name).font(.headline)
-                Text("\(bot?.name ?? "Deleted agent") · \(routine.schedule.summary) · \(routine.runLocation.label)")
+                ((bot.map { Text(verbatim: $0.name) } ?? Text("Deleted agent"))
+                    + Text(verbatim: " · \(routine.schedule.summary) · ")
+                    + Text(LocalizedStringKey(routine.runLocation.label)))
                     .font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }
             Spacer()
@@ -177,7 +179,8 @@ private struct RoutineRunRow: View {
                 Image(systemName: run.status.symbol).foregroundStyle(run.status.tint)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(run.routineName)
-                    Text("\(bot?.name ?? "Deleted agent") · \(Date(timeIntervalSince1970: run.scheduledFor / 1_000).formatted(date: .abbreviated, time: .shortened))")
+                    ((bot.map { Text(verbatim: $0.name) } ?? Text("Deleted agent"))
+                        + Text(verbatim: " · \(Date(timeIntervalSince1970: run.scheduledFor / 1_000).formatted(date: .abbreviated, time: .shortened))"))
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -204,7 +207,13 @@ private struct RoutineEditorView: View {
     @State private var onceAt: Date
     @State private var dailyTime: Date
     @State private var weekdays: Set<Int>
+    @State private var intervalAnchor: Date
+    @State private var intervalPreset: Int
+    @State private var customIntervalMinutes: Int?
     @State private var duration: Int
+    @State private var timeoutMinutes: Int?
+    @State private var intervalTimeoutDefaultApplied: Bool
+    @State private var advancedExpanded: Bool
     @State private var saving = false
 
     init(routine: Routine?, onSaved: @escaping () async -> Void) {
@@ -222,7 +231,16 @@ private struct RoutineEditorView: View {
         let time = Calendar.current.date(bySettingHour: parts.first ?? 9, minute: parts.count > 1 ? parts[1] : 0, second: 0, of: Date()) ?? Date()
         _dailyTime = State(initialValue: time)
         _weekdays = State(initialValue: Set(routine?.schedule.weekdays ?? [1, 2, 3, 4, 5]))
-        _duration = State(initialValue: routine?.durationMinutes ?? 30)
+        _intervalAnchor = State(initialValue: routine?.schedule.anchorAt.map { Date(timeIntervalSince1970: Double($0) / 1_000) } ?? Date().addingTimeInterval(15 * 60))
+        let everyMinutes = routine?.schedule.everyMinutes ?? 15
+        _intervalPreset = State(initialValue: Self.intervalPresets.contains(everyMinutes) ? everyMinutes : 0)
+        _customIntervalMinutes = State(initialValue: everyMinutes)
+        let duration = routine?.durationMinutes ?? 30
+        _duration = State(initialValue: duration)
+        let timeoutMinutes = routine?.timeoutMinutes
+        _timeoutMinutes = State(initialValue: timeoutMinutes)
+        _intervalTimeoutDefaultApplied = State(initialValue: routine != nil)
+        _advancedExpanded = State(initialValue: timeoutMinutes != nil && timeoutMinutes != 30)
     }
 
     var body: some View {
@@ -235,7 +253,6 @@ private struct RoutineEditorView: View {
                         ForEach(session.state.bots.filter { $0.hidden != true }) { bot in Text(bot.name).tag(bot.id) }
                     }
                     TextField("What should the agent do?", text: $prompt, axis: .vertical).lineLimit(4...10)
-                    Stepper("Allow up to \(duration) minutes", value: $duration, in: 15...240, step: 15)
                 }
 
                 Section {
@@ -274,6 +291,7 @@ private struct RoutineEditorView: View {
                         }
                         Text("One time").tag(RoutineSchedule.Kind.once)
                         Text("Selected days").tag(RoutineSchedule.Kind.daily)
+                        Text("Every X minutes").tag(RoutineSchedule.Kind.interval)
                     }
                     if kind == .once {
                         DatePicker("Run", selection: $onceAt, in: Date()...)
@@ -289,9 +307,55 @@ private struct RoutineEditorView: View {
                                 .accessibilityLabel(Self.dayNames[day])
                             }
                         }
+                    } else if kind == .interval {
+                        HStack(spacing: 5) {
+                            Text(intervalPreset == 0 ? "Runs on" : "Runs every")
+                            Menu {
+                                ForEach(Self.intervalPresets, id: \.self) { minutes in
+                                    Button("\(minutes) minutes") {
+                                        intervalPreset = minutes
+                                    }
+                                }
+                                Divider()
+                                Button("Custom interval…") {
+                                    intervalPreset = 0
+                                }
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Text(intervalPreset == 0 ? "a custom interval" : "\(intervalPreset)")
+                                        .fontWeight(.semibold)
+                                    Image(systemName: "chevron.up.chevron.down")
+                                        .font(.caption2)
+                                }
+                            }
+                            .accessibilityLabel("How often this routine runs")
+                            .accessibilityValue(intervalFrequencyAccessibilityValue)
+                            if intervalPreset != 0 {
+                                Text("minutes")
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        if intervalPreset == 0 {
+                            HStack {
+                                Text("Set the interval to")
+                                TextField("5–1,440", value: $customIntervalMinutes, format: .number)
+                                    .keyboardType(.numberPad)
+                                    .multilineTextAlignment(.trailing)
+                                    .frame(minWidth: 72)
+                                    .accessibilityLabel("Custom interval in minutes")
+                                Text("minutes")
+                                    .foregroundStyle(.secondary)
+                            }
+                            if selectedIntervalMinutes == nil {
+                                Text("Enter a whole number from 5 to 1,440 minutes.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.red)
+                            }
+                        }
+                        DatePicker("Starting", selection: $intervalAnchor)
                     } else {
                         Label(
-                            "This routine uses a schedule added by a newer OpenMausBot. Choose One time or Selected days before saving.",
+                            "This routine uses a schedule added by a newer OpenMausBot. Choose One time, Selected days, or Every X minutes before saving.",
                             systemImage: "exclamationmark.triangle"
                         )
                         .font(.footnote)
@@ -300,7 +364,28 @@ private struct RoutineEditorView: View {
                 } header: {
                     Text("Schedule")
                 } footer: {
-                    Text("Each occurrence creates a fresh task. No cron syntax is used.")
+                    if kind == .interval {
+                        Text("Each occurrence creates a fresh task. If the previous run is still active, the next occurrence is skipped instead of queued.")
+                    } else {
+                        Text("Each occurrence creates a fresh task. No cron syntax is used.")
+                    }
+                }
+
+                Section {
+                    DisclosureGroup(isExpanded: $advancedExpanded) {
+                        Picker("Stop if still running after", selection: $timeoutMinutes) {
+                            Text("No limit").tag(nil as Int?)
+                            ForEach(Self.timeoutOptions, id: \.self) { minutes in
+                                Text(Self.durationLabel(minutes)).tag(Optional(minutes))
+                            }
+                        }
+                    } label: {
+                        timeoutMinutes.map { Text("Advanced · \(Self.durationLabel($0)) run limit") } ?? Text("Advanced · no run limit")
+                    }
+                } footer: {
+                    if advancedExpanded {
+                        Text("Optional. The clock starts when work actually begins and does not control how often the routine starts.")
+                    }
                 }
             }
             .navigationTitle(routine == nil ? "New routine" : "Edit routine")
@@ -309,10 +394,22 @@ private struct RoutineEditorView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { Task { await save() } }
-                        .disabled(saving || kind == .unknown || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || botId.isEmpty || (kind == .daily && weekdays.isEmpty))
+                        .disabled(
+                            saving || kind == .unknown
+                                || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || botId.isEmpty
+                                || (kind == .daily && weekdays.isEmpty)
+                                || (kind == .interval && selectedIntervalMinutes == nil)
+                        )
                 }
             }
             .onAppear { if botId.isEmpty { botId = session.state.bots.first(where: { $0.hidden != true })?.id ?? "" } }
+            .onChange(of: kind) { _, nextKind in
+                guard nextKind == .interval, !intervalTimeoutDefaultApplied else { return }
+                timeoutMinutes = timeoutMinutes ?? 30
+                intervalTimeoutDefaultApplied = true
+            }
             .task {
                 runAvailability = await session.loadRoutineRunAvailability()
                 availabilityLoaded = true
@@ -322,6 +419,16 @@ private struct RoutineEditorView: View {
 
     private var cloudSelectable: Bool {
         runAvailability?.canSelect(.cloud, preserving: runOn) ?? (runOn == .cloud)
+    }
+
+    private var selectedIntervalMinutes: Int? {
+        let minutes = intervalPreset == 0 ? customIntervalMinutes : intervalPreset
+        guard let minutes, (5...1_440).contains(minutes) else { return nil }
+        return minutes
+    }
+
+    private var intervalFrequencyAccessibilityValue: String {
+        intervalPreset == 0 ? "Custom interval" : "Every \(intervalPreset) minutes"
     }
 
     private func save() async {
@@ -335,12 +442,31 @@ private struct RoutineEditorView: View {
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.timeZone = .current
         formatter.dateFormat = "HH:mm"
-        let schedule = kind == .once ? RoutineSchedule.once(at: onceAt) : .daily(time: formatter.string(from: dailyTime), weekdays: weekdays.sorted())
+        let schedule: RoutineSchedule
+        switch kind {
+        case .once:
+            schedule = .once(at: onceAt)
+        case .daily:
+            schedule = .daily(time: formatter.string(from: dailyTime), weekdays: weekdays.sorted())
+        case .interval:
+            guard let minutes = selectedIntervalMinutes else {
+                session.actionError = "Choose an interval from 5 to 1,440 minutes."
+                saving = false
+                return
+            }
+            let anchor = Calendar.current.date(bySetting: .second, value: 0, of: intervalAnchor)
+                ?? intervalAnchor
+            schedule = .interval(everyMinutes: minutes, anchorAt: anchor)
+        case .unknown:
+            saving = false
+            return
+        }
         let input = RoutineInput(
             name: String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80)),
             prompt: String(prompt.trimmingCharacters(in: .whitespacesAndNewlines).prefix(20_000)),
             botId: botId, runOn: runOn.rawValue, enabled: routine?.enabled,
-            schedule: schedule, durationMinutes: duration
+            schedule: schedule, durationMinutes: duration,
+            timeoutMinutes: timeoutMinutes, clearTimeout: timeoutMinutes == nil
         )
         if await session.saveRoutine(input, id: routine?.id) != nil {
             await onSaved()
@@ -351,6 +477,14 @@ private struct RoutineEditorView: View {
 
     private static let dayLetters = ["S", "M", "T", "W", "T", "F", "S"]
     fileprivate static let dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+    private static let intervalPresets = [5, 10, 15, 30, 60]
+    private static let timeoutOptions = stride(from: 5, through: 240, by: 5).map { $0 }
+
+    private static func durationLabel(_ minutes: Int) -> String {
+        if minutes < 60 { return "\(minutes) min" }
+        if minutes % 60 == 0 { return "\(minutes / 60) hr" }
+        return "\(minutes / 60) hr \(minutes % 60) min"
+    }
 }
 
 private extension RoutineRunLocation {
@@ -370,6 +504,13 @@ private extension RoutineSchedule {
             return Date(timeIntervalSince1970: at / 1_000).formatted(date: .abbreviated, time: .shortened)
         case .unknown:
             return "Newer schedule"
+        case .interval:
+            guard let everyMinutes else { return "Interval unavailable" }
+            let cadence = "Every \(everyMinutes) min"
+            guard let anchorAt else { return cadence }
+            let start = Date(timeIntervalSince1970: Double(anchorAt) / 1_000)
+                .formatted(date: .abbreviated, time: .shortened)
+            return "\(cadence) · starting \(start)"
         case .daily:
             break
         }

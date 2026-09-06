@@ -71,7 +71,7 @@ export function SearchResults({ query, onLanded }: { query: string; onLanded: ()
             className="flex w-full items-start gap-2.5 rounded-lg px-3 py-2 text-left hover:bg-raised/60"
           >
             {bot ? (
-              <MausAvatar color={bot.color} state="idle" size={26} animated={false} />
+              <MausAvatar color={bot.color} bodyId={bot.mascotBody ?? undefined} state="idle" size={26} animated={false} />
             ) : (
               <span className="flex size-[26px] shrink-0 items-center justify-center rounded-full bg-raised text-[11px] text-ink-secondary">#</span>
             )}

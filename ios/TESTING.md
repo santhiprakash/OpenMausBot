@@ -84,7 +84,8 @@ pnpm dev                  # 127.0.0.1:5199
 pnpm dev:desktop          # Electron starts the harness
 ```
 
-In the app: **Settings → Companion**. Turn it on. You should see either
+In the app: **Settings → Phone → Advanced & troubleshooting**. Turn on
+**Phone access**. You should see either
 
 - *"Your phone will find this computer as …"* — Bonjour is advertising, or
 - *"Listening on 192.168.x.x:8810 — enter that on your phone."* — it is not.
@@ -175,8 +176,8 @@ paid account is required to run on your own phone.
 
 On the phone, in order:
 
-1. **Pair.** In OpenMausBot → Settings → Companion, choose **Set up a
-   phone**. Scan the QR code with the phone's Camera, open OpenMausMobile,
+1. **Pair.** In OpenMausBot → Settings → Phone, choose **Pair a phone**.
+   Scan the QR code with the phone's Camera, open OpenMausMobile,
    confirm that the computer and six-digit code are filled in, then tap
    **Connect**. The computer should also appear by name for the manual path:
    tap it and type the same code.
@@ -209,23 +210,30 @@ On the phone, in order:
      same SSID and neither discovery nor a typed address gets through, the
      network is isolating its clients and there is nothing to fix on either
      machine.
-2. **The roster loads**, matching what the desktop shows.
-3. **Send a message** from the phone. It should appear on the desktop too — same
+2. **The roster loads**, matching what the desktop shows. Named sections contain
+   both their channels and bots; unfiled channels and bots stay in their built-in
+   areas.
+3. **Make a section.** Tap the folder-plus button, tap one bot normally, then
+   hold another and glide through the grid. Pausing on each tile should select
+   it with one haptic; moving back through the path should remove only its tail.
+   Name and save the section, then confirm the same bots move together on the
+   desktop. A failed save must leave the selection intact.
+4. **Send a message** from the phone. It should appear on the desktop too — same
    harness, two clients.
-4. **The approval.** This is the whole product. Ask a bot to do something that
+5. **The approval.** This is the whole product. Ask a bot to do something that
    needs permission (`run \`ls\` in my home directory` is enough for most
    engines). The card should reach the phone; answering it there should
    unblock the bot on the laptop.
-5. **Reconnect.** Background the app for a minute while the bot keeps working,
+6. **Reconnect.** Background the app for a minute while the bot keeps working,
    then come back. The transcript should catch up *without* a visible reload —
    that is the resumable stream doing its job. Watch the harness log to confirm
    it replayed rather than re-hydrated.
-6. **Dictate.** Open a chat, tap the mic, speak, and tap it again. Partial
+7. **Dictate.** Open a chat, tap the mic, speak, and tap it again. Partial
    words should replace each other in the composer rather than duplicate,
    and the result should remain editable before sending. The first attempt
    requests Microphone and Speech Recognition access. Locking or
    backgrounding the phone mid-sentence must release the mic.
-7. **Revoke.** Remove the device in Settings → Companion on the computer. The
+8. **Revoke.** Remove the device in Settings → Phone on the computer. The
    phone should land on "This phone was unpaired" rather than silently failing.
 
 ---
@@ -248,12 +256,14 @@ so this is also how the phone reaches the Mac over cellular.
 2. **On the phone:** install Tailscale from the App Store, sign in to the *same*
    account, and turn the VPN on.
 3. **In OpenMausBot → Settings → Phone:** with Phone access on, the panel now
-   prints the tailnet name — something like `macbook.tail1234.ts.net:8810`, with
-   the LAN address listed separately underneath. If it still only shows a
-   `192.168.x.x` address, the sidecar could not find the Tailscale CLI — it
-   asks once at startup, so turn the Companion toggle off and on again (or
-   restart `pnpm companion` if running it by hand) after Tailscale is up.
-4. **In the desktop setup alternatives, choose Pair over Tailscale.** Scan its
+   shows a separate **Tailscale pairing** card. Choose **Turn on phone access &
+   check** (or **Check again** when Phone access is already on); it should
+   report a tailnet name such as `macbook.tail1234.ts.net`. If it
+   finds Tailscale without a name, verify that MagicDNS is on and choose
+   **Check again**. This check refreshes a running sidecar, so restarting the
+   desktop app or dropping existing phone connections is not required.
+4. **Choose Pair over Tailscale.** The settings panel should move back to the
+   top pairing surface and label it **Tailscale pairing**. Scan its
    dedicated QR, which carries that MagicDNS name, or pair by typing the name.
    Discovery does not help here — Bonjour is multicast and a tailnet does not
    carry it — so the Tailscale QR/manual address is the path, and it is the one
@@ -282,7 +292,8 @@ Not built yet, so not bugs:
   APNs relay with project-owned Apple credentials.
 - **No call mode, spoken replies, or routine management.** Composer dictation,
   tasks, SQLite transcript search/export,
-  reactions, and edit/version switching are available from the conversation UI.
+  reactions, message copying, and edit/version switching are available from
+  the conversation UI.
 
 (Two entries that used to sit on this list have since shipped: replies stream
 token by token as the provider emits them, and each bot has a computer panel —

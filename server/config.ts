@@ -8,6 +8,7 @@ import { z } from "zod";
 
 import { writeFileAtomic } from "./atomic.ts";
 import type { InstanceConfigMap } from "./contracts.ts";
+import { parseStoredMcpServer } from "./mcp-registry.ts";
 import { parseJson, schemaIssue, type JsonObject, type JsonValue } from "./schema.ts";
 
 const optionalText = z.string().optional();
@@ -251,19 +252,29 @@ const appConfigSchema = z.object({
   imageGen: z.object({ key: optionalText }).optional(),
   /** Non-secret profile details shown in the sidebar. */
   profile: z.object({ name: optionalText, email: optionalText }).optional(),
+  /** UI language override (BCP-47, lowercase). Empty/absent = follow the
+   * system language. Unknown tags degrade to English in the renderer. */
+  language: optionalText,
   rooms: roomConfigSchema.optional(),
   localVm: localVmConfigSchema.optional(),
   features: featureConfigSchema.optional(),
   browserProfiles: browserProfilesSchema.optional(),
   instances: instanceConfigMapSchema.optional(),
+  /** User-configured MCP servers, mounted into every capable engine. Kept
+   * loosely typed HERE on purpose: parseStoredConfig throws away the whole
+   * file on a schema error, and one bad server entry must degrade to a
+   * skipped entry (customMcpServers), never to a vanished config. */
+  mcpServers: z.record(z.string(), z.unknown()).optional(),
 });
 const storedAppConfigSchema = appConfigSchema.extend({
   browserProfiles: storedBrowserProfilesSchema.optional(),
 });
-const appConfigPatchSchema = appConfigSchema.omit({ instances: true });
+const appConfigPatchSchema = appConfigSchema.omit({ instances: true, mcpServers: true });
 const jsonObjectSchema = z.record(z.string(), z.json());
 
 export interface AppConfig {
+  mcpServers?: Record<string, unknown>;
+  language?: string;
   xai?: { key?: string; url?: string };
   openaiCompat?: { key?: string; url?: string; model?: string; provider?: string };
   composio?: { apiKey?: string; userId?: string; sessionId?: string };
@@ -580,6 +591,13 @@ export function saveConfig(patch: Partial<AppConfig>): void {
     disk[key] = merged;
   }
   if (checkedPatch.vps !== undefined) disk.vps = normalizeVpsConfig(checkedPatch.vps);
+  // scalar, not a section: the merge loop above only walks objects
+  if (checkedPatch.language !== undefined) disk.language = checkedPatch.language;
+  // Custom MCP mutations go through their own dedicated local API, but
+  // saveConfig remains the single atomic persistence boundary.
+  if (checkedPatch.mcpServers !== undefined) {
+    disk.mcpServers = jsonObjectSchema.parse(checkedPatch.mcpServers);
+  }
   // the whole list is the unit of change: an add or a delete arrives as the
   // new list, never as a per-item merge
   if (checkedPatch.browserProfiles !== undefined) {
@@ -697,7 +715,8 @@ export function instanceConfigs(cfg: AppConfig): InstanceConfigMap {
   // a credential Milind doesn't want to manage; an `instances` entry brings
   // it back anytime.
   //
-  // Google rides `antigravityAgent` (the `agy` CLI), not `geminiAgent`:
+  // Google rides `antigravityAgent` (the official Google ACP server), not
+  // `geminiAgent`:
   // Google retired Gemini CLI for the free/Pro/Ultra tiers on 2026-06-18
   // (developers.googleblog.com, "transitioning Gemini CLI to Antigravity
   // CLI"), so a default `gemini` instance could only ever show unavailable.
@@ -775,4 +794,47 @@ export function instanceConfigs(cfg: AppConfig): InstanceConfigMap {
     }
   }
   return map;
+}
+
+// ── user-configured MCP servers ─────────────────────────────────────────
+// config.json: { "mcpServers": { "notes": { "command": "npx", "args":
+// ["-y", "@x/notes-mcp"], "env": { "NOTES_TOKEN": "…" } } } }
+// stdio only for now; validate-with-skip so one bad entry never takes the
+// fleet down, and each skip is logged once with a sentence that teaches.
+
+export interface CustomMcpServer {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+}
+
+const reportedMcpSkips = new Set<string>();
+function skipMcpEntry(name: string, why: string): void {
+  const key = `${name}: ${why}`;
+  if (reportedMcpSkips.has(key)) return;
+  reportedMcpSkips.add(key);
+  console.error(`mcpServers.${JSON.stringify(name)} skipped — ${why}`);
+}
+
+/** The validated, normalized custom servers from config — or {}. */
+export function customMcpServers(cfg: AppConfig): Record<string, CustomMcpServer> {
+  const out: Record<string, CustomMcpServer> = {};
+  for (const [name, raw] of Object.entries(cfg.mcpServers ?? {})) {
+    if (raw && typeof raw === "object" && "url" in raw) {
+      skipMcpEntry(name, 'only stdio servers ("command") are supported so far — HTTP transports are a planned follow-up');
+      continue;
+    }
+    const parsed = parseStoredMcpServer(name, raw);
+    if (!parsed.ok) {
+      skipMcpEntry(name, `${parsed.error} Expected { "command": "npx", "args": [...], "env": { ... } }`);
+      continue;
+    }
+    if (!parsed.server.enabled) continue;
+    out[name] = {
+      command: parsed.server.command,
+      args: parsed.server.args,
+      env: parsed.server.env,
+    };
+  }
+  return out;
 }

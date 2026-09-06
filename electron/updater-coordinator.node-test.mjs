@@ -14,17 +14,30 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function harness() {
+function harness(options) {
   const updater = new EventEmitter();
   // electron-updater has its own error listener; model that without routing it.
   updater.on("error", () => {});
   let state = { status: "idle" };
   const states = [];
-  const coordinator = createUpdaterCoordinator(updater, (patch) => {
-    state = { ...state, ...patch };
-    states.push({ ...state });
-  });
+  const coordinator = createUpdaterCoordinator(
+    updater,
+    (patch) => {
+      state = { ...state, ...patch };
+      states.push({ ...state });
+    },
+    options,
+  );
   return { updater, coordinator, states, getState: () => state };
+}
+
+// Drives a successful download so install() has staged paths to hand off.
+async function downloadInto(h, files = ["/tmp/OpenMausBot-2.0.0-amd64.deb"]) {
+  h.updater.downloadUpdate = () => {
+    h.updater.emit("update-downloaded", { version: "2.0.0" });
+    return Promise.resolve(files);
+  };
+  await h.coordinator.download();
 }
 
 function errorStates(states) {
@@ -322,4 +335,154 @@ test("an updater error event and rejected promise produce one deterministic stat
   await download.coordinator.download();
   assert.equal(errorStates(download.states).length, 1);
   assert.deepEqual(download.getState(), { status: "error", message: "download failed once" });
+});
+
+test("the hand-off install opens the staged package instead of quitting", async () => {
+  const received = [];
+  const h = harness({
+    handOffInstall: (files) => {
+      received.push(files);
+      // what the user still has to do travels back with the state
+      return Promise.resolve({ command: "sudo apt-get install -y '/tmp/x.deb'", terminalOpened: true });
+    },
+  });
+  h.updater.quitAndInstall = () => assert.fail("a system package must not be installed by quitAndInstall");
+
+  await downloadInto(h);
+  assert.equal(h.getState().status, "downloaded");
+
+  h.coordinator.install();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(received, [["/tmp/OpenMausBot-2.0.0-amd64.deb"]]);
+  assert.equal(h.getState().status, "handed-off");
+  // the user watched something happen between the click and the result
+  assert.ok(h.states.some((entry) => entry.status === "installing"));
+  assert.equal(h.getState().command, "sudo apt-get install -y '/tmp/x.deb'");
+  assert.equal(h.getState().terminalOpened, true);
+});
+
+test("a failed hand-off is reported instead of leaving the card spinning", async () => {
+  const h = harness({ handOffInstall: () => Promise.reject(new Error("no handler for .deb")) });
+
+  await downloadInto(h);
+  h.coordinator.install();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // version survives the merge from the download — assert what the card reads
+  assert.equal(h.getState().status, "error");
+  assert.equal(h.getState().message, "no handler for .deb");
+});
+
+test("the hand-off sees no staged file when nothing downloaded", async () => {
+  const received = [];
+  const h = harness({
+    handOffInstall: (files) => {
+      received.push(files);
+      return Promise.resolve();
+    },
+  });
+
+  h.coordinator.install();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(received, [null]);
+});
+
+test("without a hand-off the install still quits and installs", async () => {
+  const h = harness();
+  let called = 0;
+  h.updater.quitAndInstall = () => {
+    called += 1;
+  };
+
+  await downloadInto(h, ["/tmp/OpenMausBot-2.0.0.AppImage"]);
+  h.coordinator.install();
+
+  assert.equal(called, 1);
+  assert.equal(h.getState().status, "installing");
+});
+
+test("a staged update survives hourly checks until the user explicitly checks again", async () => {
+  const h = harness();
+  let checks = 0;
+  h.updater.checkForUpdates = async () => {
+    checks += 1;
+    h.updater.emit("checking-for-update");
+    h.updater.emit("update-available", { version: "2.1.0" });
+  };
+  await downloadInto(h);
+  const staged = h.getState();
+
+  await h.coordinator.check();
+  assert.equal(checks, 0);
+  assert.deepEqual(h.getState(), staged);
+
+  await h.coordinator.check(true);
+  assert.equal(checks, 1);
+  assert.equal(h.getState().status, "available");
+  assert.equal(h.getState().version, "2.1.0");
+});
+
+test("a superseded check error event cannot invalidate a completed download", async () => {
+  const h = harness();
+  const pending = deferred();
+  h.updater.checkForUpdates = () => pending.promise;
+  const check = h.coordinator.check();
+  await downloadInto(h);
+
+  const error = new Error("the earlier feed request failed");
+  h.updater.emit("error", error);
+  pending.reject(error);
+  await check;
+
+  assert.equal(h.getState().status, "downloaded");
+  assert.equal(h.getState().version, "2.0.0");
+});
+
+test("checks cannot replace an install in progress or its completed hand-off", async () => {
+  const pending = deferred();
+  const h = harness({ handOffInstall: () => pending.promise });
+  h.updater.checkForUpdates = () => assert.fail("installation owns the updater");
+  await downloadInto(h);
+  h.coordinator.install();
+
+  await h.coordinator.check();
+  await h.coordinator.check(true);
+  assert.equal(h.getState().status, "installing");
+
+  pending.resolve({ command: "install the staged package", terminalOpened: false });
+  await new Promise((resolve) => setImmediate(resolve));
+  const handedOff = h.getState();
+  await h.coordinator.check();
+  assert.equal(h.getState().status, "handed-off");
+  assert.deepEqual(h.getState(), handedOff);
+});
+
+test("failed download and hand-off actions survive automatic checks but remain retryable", async () => {
+  for (const failure of ["download", "hand-off"]) {
+    const h = harness({ handOffInstall: () => Promise.reject(new Error("hand-off failed")) });
+    if (failure === "download") {
+      h.updater.downloadUpdate = () => Promise.reject(new Error("download failed"));
+      await h.coordinator.download();
+    } else {
+      await downloadInto(h);
+      h.coordinator.install();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    let checks = 0;
+    h.updater.checkForUpdates = async () => {
+      checks += 1;
+      h.updater.emit("checking-for-update");
+      h.updater.emit("update-available", { version: "2.0.0" });
+    };
+    const failed = h.getState();
+    assert.equal(failed.status, "error");
+    await h.coordinator.check();
+    assert.equal(checks, 0);
+    assert.deepEqual(h.getState(), failed);
+    await h.coordinator.check(true);
+    assert.equal(checks, 1);
+    assert.equal(h.getState().status, "available");
+  }
 });

@@ -13,6 +13,33 @@ import Foundation
 
 // MARK: - Messages
 
+public struct SkillRequestCardData: Codable, Hashable, Sendable {
+    public var version: Int
+    public var requestId: String
+    public var botId: String
+    public var threadId: String
+    public var stagedId: String
+    public var action: String
+    public var name: String
+    public var gist: String
+    /// Optional so approval cards persisted by older desktop builds still decode.
+    public var source: String?
+    /// The exact, secret-scrubbed instructions the approval enables.
+    public var preview: String?
+    public var sha256: String?
+    public var warnings: [String]
+    public var createdAt: Int64
+
+    /// A current client echoes this only after it can show the complete
+    /// proposal. Legacy cards remain visible but deny-only.
+    public var reviewedSha256: String? {
+        guard let preview, !preview.isEmpty, let sha256, sha256.utf8.count == 64 else { return nil }
+        let hexadecimal = CharacterSet(charactersIn: "0123456789abcdefABCDEF")
+        guard sha256.unicodeScalars.allSatisfy(hexadecimal.contains) else { return nil }
+        return sha256
+    }
+}
+
 public struct OptionCard: Codable, Hashable, Sendable {
     public var title: String
     public var subtitle: String
@@ -27,6 +54,9 @@ public struct OptionCard: Codable, Hashable, Sendable {
     public var held: String?
     /// The narrow grant "always allow" would remember, e.g. `Bash:git`.
     public var allowKey: String?
+    /// Learned skills must show their complete reviewed contents before an
+    /// approval button is offered on a compact companion surface.
+    public var skillRequest: SkillRequestCardData? = nil
 
     /// A card is actionable while it is unanswered and still has a request
     /// behind it. Everything else is transcript.
@@ -54,8 +84,8 @@ public struct OptionCard: Codable, Hashable, Sendable {
 
     /// Shared by all of the app's card surfaces and by Live Activities.
     public static func isRefusal(_ choice: String) -> Bool {
-        choice.trimmingCharacters(in: .whitespacesAndNewlines)
-            .caseInsensitiveCompare("Deny") == .orderedSame
+        let normalized = choice.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return ["deny", "cancel", "dismiss"].contains(normalized)
     }
 
     /// A provider may include the standing grant as an option of its own.
@@ -74,6 +104,25 @@ public struct ToolActivity: Codable, Hashable, Sendable {
     public var spoken: String?
     /// Marks an error fixed by installing something, not by retrying.
     public var setup: Bool?
+}
+
+/// A credential request created by the desktop for one paused task.
+///
+/// The phone may fill this request only through the QR-pinned HPKE transport.
+/// The payload contains identifiers and display copy, never the credential.
+public struct SecretRequestCardData: Codable, Hashable, Sendable {
+    public var target: String?
+    public var label: String?
+    public var description: String?
+    public var placeholder: String?
+    public var helpUrl: String?
+    public var requestKey: String?
+    public var provided: Bool?
+    public var dismissed: Bool?
+    public var resumed: Bool?
+    public var error: String?
+
+    public var isPending: Bool { provided != true && dismissed != true }
 }
 
 public struct Sender: Codable, Hashable, Sendable {
@@ -96,7 +145,7 @@ public struct CommChip: Codable, Hashable, Sendable {
 
 public struct Message: Codable, Hashable, Identifiable, Sendable {
     public enum Kind: String, Codable, Sendable {
-        case text, options, activity, screen
+        case text, options, activity, screen, secret
         /// A kind this build has never heard of.
         ///
         /// Not decorative. `kind` is not optional, so without this a single
@@ -133,6 +182,7 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
     public var at: Double
     public var text: String?
     public var card: OptionCard?
+    public var secret: SecretRequestCardData?
     public var tool: ToolActivity?
     /// The message this one follows; nil at the thread root. Two messages
     /// sharing a parent are a fork.
@@ -156,6 +206,15 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
 public struct ModelSelection: Codable, Hashable, Sendable {
     public var instanceId: String
     public var model: String
+    /// Optional reasoning effort passed through to engines that support it.
+    /// Older computers omit this field, which means the engine default.
+    public var effort: String?
+
+    public init(instanceId: String, model: String, effort: String? = nil) {
+        self.instanceId = instanceId
+        self.model = model
+        self.effort = effort
+    }
 }
 
 public struct BotTask: Codable, Hashable, Sendable {
@@ -175,7 +234,9 @@ public struct Bot: Codable, Hashable, Identifiable, Sendable {
     /// An app-owned `/api/attachments/:name` URL. The URL is intentionally
     /// relative so every paired device fetches it from its own computer.
     public var avatarUrl: String?
-    /// `mascot` ignores `avatarUrl`; the other values describe the image mask.
+    /// `mascot` draws the mascot itself — its gradient body with the bot's
+    /// live face on top. The rest crop `avatarUrl` and replace the mascot
+    /// entirely, and the value names the mask. See `shared/bot-avatar.ts`.
     public var avatarCrop: AvatarCrop?
     public var unread: Bool
     public var modelSelection: ModelSelection
@@ -183,7 +244,12 @@ public struct Bot: Codable, Hashable, Identifiable, Sendable {
     public var busy: Bool?
     public var pinned: Bool?
     public var hidden: Bool?
+    /// Desktop sidebar section. Missing or blank means the built-in Bots area.
+    public var section: String?
     public var chiefOfStaff: Bool?
+    /// ask, auto, full, or custom. Missing on older harnesses; autoApprove
+    /// remains the compatibility mirror for older companion builds.
+    public var approvalMode: String?
     public var autoApprove: Bool?
     public var alwaysAllow: [String]?
     public var computer: String?
@@ -194,6 +260,9 @@ public struct Bot: Codable, Hashable, Identifiable, Sendable {
     public var speakReplies: Bool?
     public var voice: String?
     public var mascotExpression: String?
+    /// Which body from the mascot body catalog this bot wears. Absent (an
+    /// older harness included) means the shipped `cursor` silhouette.
+    public var mascotBody: String?
     public var tasks: [BotTask]?
     public var messages: [Message]?
     public var activeLeafId: String?
@@ -218,6 +287,31 @@ public enum AvatarCrop: String, Codable, CaseIterable, Hashable, Sendable {
     }
 }
 
+/// The "who" section of a bot overview: identity and its soul in one line.
+public struct BotOverviewWho: Codable, Hashable, Sendable {
+    public var name: String
+    public var title: String
+    public var blurb: String
+    public var soulLead: String
+}
+
+public struct BotOverviewRecent: Codable, Hashable, Sendable {
+    /// epoch milliseconds, like every other timestamp on the wire
+    public var at: Double
+    public var summary: String
+}
+
+/// A read-only summary of one bot: who it is, what it does, what it can
+/// reach, what it won't do, and its recent activity. No settings and no
+/// transcript — this is the shape a phone is allowed to poll for.
+public struct BotOverview: Codable, Hashable, Sendable {
+    public var who: BotOverviewWho
+    public var does: [String]
+    public var reaches: [String]
+    public var wont: [String]
+    public var recent: [BotOverviewRecent]
+}
+
 public struct GroupResponder: Codable, Hashable, Sendable {
     public var kind: String
     public var botId: String?
@@ -233,6 +327,8 @@ public struct Room: Codable, Hashable, Identifiable, Sendable {
     public var unread: Bool
     public var createdAt: Double
     public var dm: Bool?
+    /// Desktop sidebar section. Missing or blank means the built-in Channels area.
+    public var section: String?
     public var busyBotId: String?
     /// Independent user conversations in this channel. Bot-to-bot rooms
     /// omit tasks because their transcript is the canonical private chat.
@@ -441,12 +537,24 @@ public struct ModelCatalog: Codable, Hashable, Sendable {
     public var options: [ModelOption]
 }
 
+/// The small, phone-safe part of an engine's capabilities needed by bot
+/// settings. Missing capabilities or effort levels mean the engine does not
+/// offer a reasoning control.
+public struct InstanceCapabilities: Codable, Hashable, Sendable {
+    public var effortLevels: [String]?
+
+    public init(effortLevels: [String]? = nil) {
+        self.effortLevels = effortLevels
+    }
+}
+
 public struct Instance: Codable, Hashable, Identifiable, Sendable {
     public var instanceId: String
     public var driverKind: String
     public var displayName: String?
     public var snapshot: ProviderSnapshot
     public var models: ModelCatalog
+    public var capabilities: InstanceCapabilities? = nil
 
     public var id: String { instanceId }
 }
@@ -530,6 +638,7 @@ public struct BotProfilePatch: Encodable, Sendable {
     public var notifications: Bool?
     public var avatarUrl: AvatarURL?
     public var avatarCrop: AvatarCrop?
+    public var mascotBody: String?
     public var voice: String?
     public var speakReplies: Bool?
 
@@ -548,6 +657,7 @@ public struct BotProfilePatch: Encodable, Sendable {
         notifications: Bool? = nil,
         avatarUrl: AvatarURL? = nil,
         avatarCrop: AvatarCrop? = nil,
+        mascotBody: String? = nil,
         voice: String? = nil,
         speakReplies: Bool? = nil
     ) {
@@ -557,12 +667,13 @@ public struct BotProfilePatch: Encodable, Sendable {
         self.notifications = notifications
         self.avatarUrl = avatarUrl
         self.avatarCrop = avatarCrop
+        self.mascotBody = mascotBody
         self.voice = voice
         self.speakReplies = speakReplies
     }
 
     private enum CodingKeys: String, CodingKey {
-        case name, title, description, notifications, avatarUrl, avatarCrop, voice, speakReplies
+        case name, title, description, notifications, avatarUrl, avatarCrop, mascotBody, voice, speakReplies
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -578,6 +689,7 @@ public struct BotProfilePatch: Encodable, Sendable {
             }
         }
         try values.encodeIfPresent(avatarCrop, forKey: .avatarCrop)
+        try values.encodeIfPresent(mascotBody, forKey: .mascotBody)
         try values.encodeIfPresent(voice, forKey: .voice)
         try values.encodeIfPresent(speakReplies, forKey: .speakReplies)
     }
@@ -591,7 +703,7 @@ public struct Voice: Codable, Hashable, Identifiable, Sendable {
 
 public struct RoutineSchedule: Codable, Hashable, Sendable {
     public enum Kind: String, Codable, Sendable {
-        case once, daily
+        case once, daily, interval
         /// A schedule introduced by a newer desktop. It remains visible but
         /// cannot be toggled or saved until the user chooses a supported kind.
         case unknown
@@ -610,6 +722,8 @@ public struct RoutineSchedule: Codable, Hashable, Sendable {
     public var at: Double?
     public var time: String?
     public var weekdays: [Int]?
+    public var everyMinutes: Int?
+    public var anchorAt: Int64?
 
     public static func once(at: Date) -> Self {
         .init(type: .once, at: at.timeIntervalSince1970 * 1_000, time: nil, weekdays: nil)
@@ -617,6 +731,17 @@ public struct RoutineSchedule: Codable, Hashable, Sendable {
 
     public static func daily(time: String, weekdays: [Int]) -> Self {
         .init(type: .daily, at: nil, time: time, weekdays: weekdays)
+    }
+
+    public static func interval(everyMinutes: Int, anchorAt: Date) -> Self {
+        .init(
+            type: .interval,
+            at: nil,
+            time: nil,
+            weekdays: nil,
+            everyMinutes: everyMinutes,
+            anchorAt: Int64((anchorAt.timeIntervalSince1970 * 1_000).rounded())
+        )
     }
 }
 
@@ -629,6 +754,7 @@ public struct Routine: Codable, Hashable, Identifiable, Sendable {
     public var enabled: Bool
     public var schedule: RoutineSchedule
     public var durationMinutes: Int
+    public var timeoutMinutes: Int?
     public var nextRunAt: Double?
     public var createdAt: Double
     public var updatedAt: Double
@@ -640,6 +766,7 @@ public struct RoutineRun: Codable, Hashable, Identifiable, Sendable {
     public var routineName: String
     public var prompt: String?
     public var durationMinutes: Int?
+    public var timeoutMinutes: Int?
     public var botId: String
     public var runOn: String
     public var scheduledFor: Double
@@ -663,10 +790,15 @@ public struct RoutineInput: Encodable, Sendable {
     public var enabled: Bool?
     public var schedule: RoutineSchedule
     public var durationMinutes: Int
+    /// A value replaces the stored limit; nil leaves it unchanged on PATCH.
+    public var timeoutMinutes: Int?
+    /// Explicitly writes JSON null when `timeoutMinutes` is nil.
+    public var clearTimeout: Bool
 
     public init(
         name: String, prompt: String, botId: String, runOn: String = "maus",
-        enabled: Bool? = nil, schedule: RoutineSchedule, durationMinutes: Int = 30
+        enabled: Bool? = nil, schedule: RoutineSchedule, durationMinutes: Int = 30,
+        timeoutMinutes: Int? = nil, clearTimeout: Bool = false
     ) {
         self.name = name
         self.prompt = prompt
@@ -675,6 +807,25 @@ public struct RoutineInput: Encodable, Sendable {
         self.enabled = enabled
         self.schedule = schedule
         self.durationMinutes = durationMinutes
+        self.timeoutMinutes = timeoutMinutes
+        self.clearTimeout = clearTimeout
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, prompt, botId, runOn, enabled, schedule, durationMinutes, timeoutMinutes
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(name, forKey: .name)
+        try values.encode(prompt, forKey: .prompt)
+        try values.encode(botId, forKey: .botId)
+        try values.encode(runOn, forKey: .runOn)
+        try values.encodeIfPresent(enabled, forKey: .enabled)
+        try values.encode(schedule, forKey: .schedule)
+        try values.encode(durationMinutes, forKey: .durationMinutes)
+        if let timeoutMinutes { try values.encode(timeoutMinutes, forKey: .timeoutMinutes) }
+        else if clearTimeout { try values.encodeNil(forKey: .timeoutMinutes) }
     }
 }
 
@@ -716,6 +867,8 @@ public extension Routine {
         switch schedule.type {
         case .daily:
             true
+        case .interval:
+            (5...1_440).contains(schedule.everyMinutes ?? 0) && schedule.anchorAt != nil
         case .once:
             (schedule.at ?? -.infinity) > date.timeIntervalSince1970 * 1_000
         case .unknown:
@@ -853,6 +1006,10 @@ struct ActiveBranchResponse: Codable, Sendable {
 struct BotResponse: Codable, Sendable {
     var bot: Bot
 }
+struct SidebarSectionResponse: Codable, Sendable {
+    var section: String
+    var bots: [Bot]
+}
 struct RoomResponse: Codable, Sendable {
     var group: Room
 }
@@ -882,4 +1039,31 @@ struct RoutineRunResponse: Codable, Sendable { var run: RoutineRun }
 
 struct ConnectorAuthorizationResponse: Codable, Sendable {
     var url: String
+}
+
+// MARK: - Server sessions (pairing with a server directly)
+
+/// What `POST /api/auth/pair` returns on a server: the bearer, the session
+/// it opened, and the server's public descriptor.
+public struct ServerPairResponse: Codable, Sendable {
+    public var token: String
+    public var session: ServerSession
+    public var environment: ServerEnvironment
+}
+
+public struct ServerSession: Codable, Hashable, Sendable {
+    public var id: String
+    public var label: String
+    public var scopes: [String]
+    public var expiresAt: Double?
+
+    public var isAdmin: Bool { scopes.contains("admin") }
+}
+
+/// `GET /.well-known/openmausbot/environment`, served without a session.
+public struct ServerEnvironment: Codable, Hashable, Sendable {
+    public var environmentId: String
+    public var label: String
+    public var platform: String?
+    public var version: String?
 }

@@ -33,6 +33,40 @@ describe("intakeFiles", () => {
     expect(out.notice).toBeNull();
   });
 
+  it("uses a private uploaded path for supported documents", async () => {
+    const out = await intakeFiles([file("notes.pdf", "application/pdf")], {
+      allowImages: true,
+      getPath: onDisk,
+      uploadImage: upload,
+      uploadFile: async (value) => ({
+        kind: "file",
+        id: "private-file",
+        name: value.name,
+        path: "/private/attachments/id.pdf",
+        size: value.size,
+      }),
+    });
+
+    expect(out.attachments).toEqual([expect.objectContaining({
+      kind: "file",
+      name: "notes.pdf",
+      path: "/private/attachments/id.pdf",
+    })]);
+    expect(out.notice).toBeNull();
+  });
+
+  it("does not fall back to an arbitrary disk path when a private upload fails", async () => {
+    const out = await intakeFiles([file("notes.pdf", "application/pdf")], {
+      allowImages: true,
+      getPath: onDisk,
+      uploadImage: upload,
+      uploadFile: async () => { throw new Error("private store is full"); },
+    });
+
+    expect(out.attachments).toEqual([]);
+    expect(out.notice).toContain("notes.pdf: private store is full");
+  });
+
   it("treats an image as an ordinary file when the engine cannot read one", async () => {
     const out = await intakeFiles([file("shot.png", "image/png")], {
       allowImages: false,

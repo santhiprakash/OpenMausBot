@@ -1,6 +1,9 @@
 // The narrow bridge the Electron preload exposes. Absent in the browser.
 
 declare global {
+/** The package.json version, inlined by Vite's define at build time. */
+const __APP_VERSION__: string;
+
 type NativeSkillRecordingEvent = {
   type: "app" | "click" | "scroll" | "key" | "typing" | "clipboard" | "download";
   atMs: number;
@@ -113,7 +116,7 @@ type SkillRecordingPayload = {
     partition?: string | null;
     profile?: string | null;
     mode?: "compact" | "expanded" | null;
-    code?: "renderer-gone" | "profile-changed" | "evicted";
+    code?: "renderer-gone" | "profile-deleted" | "evicted";
   }
 
   interface DesktopWorkspaceState {
@@ -124,17 +127,52 @@ type SkillRecordingPayload = {
     code?: "load-failed" | "renderer-gone";
   }
 
+  interface DesktopRemoteClientState {
+    active: boolean;
+    endpoint?: string;
+    serverName?: string;
+    deviceId?: string;
+  }
+
   interface Window {
     ogb?: {
       platform: NodeJS.Platform;
+      /** Saved servers and the active one (desktop Server menu). Present on
+       * the local server's UI; a remote server's page sees a reduced bridge. */
+      environments?: {
+        state: () => Promise<{
+          localOrigin: string;
+          remote: boolean;
+          activeId: string;
+          environments: Array<{ id: string; name: string; origin: string }>;
+        }>;
+        switch: (id: string) => Promise<void>;
+        addFromLink: (link: string) => Promise<void>;
+        forget: (id: string) => Promise<void>;
+      };
       getCapabilities(): Promise<DesktopCapabilities>;
       onCapabilitiesChanged(cb: (capabilities: DesktopCapabilities) => void): () => void;
+      remoteClient?: {
+        active: boolean;
+        state(): Promise<DesktopRemoteClientState>;
+        pair(endpoint: string, code: string): Promise<DesktopRemoteClientState>;
+        disconnect(): Promise<DesktopRemoteClientState>;
+      };
       companionAccount?: {
         state(): Promise<CompanionAccountState>;
         requestCode(email: string): Promise<CompanionAccountState>;
         verifyCode(email: string, code: string): Promise<CompanionAccountState>;
         retry(): Promise<CompanionAccountState>;
         signOut(): Promise<CompanionAccountState>;
+      };
+      /** Local-shell-only bridge for trusted approval-mode transitions. It is
+       * absent on remote server pages and in older desktop builds. */
+      approvals?: {
+        setMode(
+          botId: string,
+          mode: import("../../shared/approval-mode").ApprovalMode,
+          options?: { acknowledgeLocalAuto?: boolean },
+        ): Promise<import("../state/store").Bot>;
       };
       localControl: {
         status(): Promise<LinuxLocalControlStatus>;
@@ -206,28 +244,6 @@ type SkillRecordingPayload = {
       };
       /** Two Local VM viewers embedded in one app window. URLs are accepted
        * only by main-process validation and never return over this bridge. */
-      /** The built-in browser surface; absent in a browser tab or an older shell. */
-      browser?: {
-        available(): Promise<boolean>;
-        state(botId: string): Promise<BrowserSurfaceState>;
-        layout(
-          botId: string,
-          bounds: DesktopWorkspaceBounds | null,
-          profile?: string,
-          mode?: "compact" | "expanded",
-        ): Promise<BrowserSurfaceState>;
-        navigate(botId: string, url: string, profile?: string): Promise<{ url: string; title: string }>;
-        back(botId: string, profile?: string): Promise<{ url: string; title: string }>;
-        forward?(botId: string, profile?: string): Promise<{ url: string; title: string }>;
-        /** Immediately gates native browser mutations while the durable
-         * server-side human-control snapshot catches up. */
-        setHumanControl?(botId: string, held: boolean, profile?: string): Promise<boolean>;
-        /** Native page focus/input means the person has taken the wheel. */
-        onUserInteraction?(cb: (event: { botId: string }) => void): () => void;
-        forgetProfile?(partitionId: string): Promise<{ dropped: number }>;
-        close(botId: string): Promise<boolean>;
-        onState(cb: (state: BrowserSurfaceState) => void): () => void;
-      };
       desktopWorkspace?: {
         open(input: {
           contextId: string;
@@ -263,7 +279,7 @@ type SkillRecordingPayload = {
       updater?: {
         check(): Promise<void>;
         download(): Promise<void>;
-        /** quit-and-install the downloaded update */
+        /** apply the download: quit-and-install, or copy the command and open a terminal */
         install(): Promise<void>;
         onState(cb: (s: UpdaterState) => void): () => void;
       };
@@ -292,10 +308,22 @@ export interface UpdaterState {
     | "downloading"
     | "downloaded"
     | "installing"
+    /** the command is on the clipboard; the user finishes in a terminal */
+    | "handed-off"
     | "error";
   version?: string;
   percent?: number;
   message?: string;
+  /**
+   * How the download gets applied. "restart" quits and installs in place;
+   * "handoff" copies the install command and opens a terminal so the user
+   * can finish — Ubuntu .deb (and rpm/pacman) builds use this.
+   */
+  installMode?: "restart" | "handoff";
+  /** hand-off only: the install command, already on the clipboard */
+  command?: string;
+  /** hand-off only: whether a terminal was opened to paste it into */
+  terminalOpened?: boolean;
 }
 
 export interface CompanionAccountState {

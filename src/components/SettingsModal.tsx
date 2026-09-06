@@ -1,18 +1,20 @@
 // App settings, as a real modal with sections rather than one long panel.
-// Per-bot settings (persona, model, computer) stay in SettingsPanel — this
+// Per-bot settings (persona, model, computer) live in BotSettingsDialog — this
 // is the stuff shared by every bot: who you are, your keys, and the
 // machine your bots can borrow.
 import { useEffect, useRef, useState } from "react";
-import { Coins, Globe, KeyRound, Monitor, Search, Smartphone, Terminal, Trash2, User, X } from "lucide-react";
+import { Coins, FlaskConical, Globe, KeyRound, Monitor, Search, TabletSmartphone, Terminal, Trash2, User, X } from "lucide-react";
 import { api, useStore, type AppSettingsSection, type ConfigStatus } from "@/state/store";
 import { analyticsEnabled, setAnalyticsEnabled } from "@/lib/analytics";
-import { builtInBrowserEnabled, showToolCallsEnabled, skillRecorderEnabled } from "@/lib/feature-flags";
+import { browserAvailable, browserUnavailableReason, builtInBrowserEnabled, showToolCallsEnabled, skillRecorderEnabled } from "@/lib/feature-flags";
+import { localeChoices } from "@/locales";
 import { ApiKeyRow, VpsConnection } from "./ApiKeys";
 import { useUpdaterState } from "@/lib/updater";
 import { EnginesSettings } from "./EnginesSettings";
 import { LocalComputerSection } from "./LocalComputerSection";
 import { CompanionSection } from "./CompanionSection";
-import { Card } from "./SettingsPrimitives";
+import { RemoteComputerSection } from "./RemoteComputerSection";
+import { Card, Switch } from "./SettingsPrimitives";
 import { UsageSection } from "./UsageSection";
 import { SkinPicker } from "./SkinPicker";
 import { RoomTurnTimeoutSettings } from "./RoomTurnTimeoutSettings";
@@ -30,9 +32,10 @@ const SECTIONS: Array<{
   keywords: string[];
 }> = [
   { id: "general", label: "General", icon: User, keywords: ["profile", "name", "email", "skin", "theme", "appearance", "analytics", "updates", "tools", "tool calls"] },
+  { id: "experimental", label: "Experimental", icon: FlaskConical, keywords: ["early", "preview", "teach", "skill", "browser", "profiles"] },
   { id: "connections", label: "Connections", icon: KeyRound, keywords: ["keys", "api", "composio", "box", "xai", "vps"] },
   { id: "engines", label: "Engines", icon: Terminal, keywords: ["models", "claude", "grok", "providers", "cli"] },
-  { id: "companion", label: "Phone", icon: Smartphone, keywords: ["companion", "phone", "pair", "mobile"] },
+  { id: "companion", label: "Remote access", icon: TabletSmartphone, keywords: ["companion", "device", "phone", "desktop", "client", "host", "pair", "pairing", "mobile", "https", "secure", "tailscale", "wifi", "remote", "advanced"] },
   { id: "computer", label: "Local VM", icon: Monitor, keywords: ["vm", "virtual", "desktop"] },
   { id: "usage", label: "Usage", icon: Coins, keywords: ["tokens", "cost", "billing"] },
 ];
@@ -128,19 +131,62 @@ function AnalyticsRow() {
       title="Usage analytics"
       subtitle="Anonymous product events — app opened, which features get used. Never conversations, prompts, file contents, or bot output. Your email is only attached if you shared it during setup."
     >
-      <button
-        role="switch"
-        aria-checked={on}
+      <Switch
+        checked={on}
         aria-label="Send usage analytics"
         onClick={() => {
           const next = !on;
           setAnalyticsEnabled(next);
           setOn(next);
         }}
-        className={cnSwitch(on)}
+      />
+    </Card>
+  );
+}
+
+function LanguageRow() {
+  const { state, dispatch } = useStore();
+  const current = state.config?.language ?? "";
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const save = async (language: string) => {
+    if (saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      const config: ConfigStatus = await api("/api/config", {
+        method: "PATCH",
+        body: JSON.stringify({ language }),
+      });
+      dispatch({ type: "configStatus", config });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not save the language.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card
+      title="Language"
+      subtitle="The app follows your system language unless you pick one here. Only part of the interface is translated so far — untranslated text stays in English."
+    >
+      <select
+        value={current}
+        disabled={saving}
+        aria-label="App language"
+        onChange={(event) => void save(event.target.value)}
+        className="w-full max-w-[280px] rounded-lg border border-hairline/40 bg-inset px-2.5 py-1.5 text-[13.5px] text-ink disabled:cursor-wait disabled:opacity-50"
       >
-        <span className={cnKnob(on)} />
-      </button>
+        <option value="">System</option>
+        {localeChoices.map(({ code, label }) => (
+          <option key={code} value={code}>
+            {label}
+          </option>
+        ))}
+      </select>
+      {error ? <p role="alert" className="mt-2 text-[12px] text-danger">{error}</p> : null}
     </Card>
   );
 }
@@ -180,16 +226,13 @@ function ToolCallsRow() {
             Named chips for Bash, search, and other tools. Errors and bot-to-bot messages still appear.
           </div>
         </div>
-        <button
-          role="switch"
-          aria-checked={enabled}
+        <Switch
+          checked={enabled}
           aria-label="Show tool calls in chat"
           disabled={saving}
           onClick={() => void toggle()}
-          className={`${cnSwitch(enabled)} disabled:cursor-wait disabled:opacity-50`}
-        >
-          <span className={cnKnob(enabled)} />
-        </button>
+          className="disabled:cursor-wait disabled:opacity-50"
+        />
       </div>
       {error ? <p role="alert" className="mt-2 text-[12px] text-danger">{error}</p> : null}
     </Card>
@@ -200,7 +243,7 @@ function ExperimentalFeaturesRow() {
   const { state, dispatch } = useStore();
   const skillRecorder = skillRecorderEnabled(state.config);
   const browser = builtInBrowserEnabled(state.config);
-  const desktopBrowser = Boolean(window.ogb?.browser);
+  const desktopBrowser = browserAvailable(state.config);
   const browserBlockedOnWindows = window.ogb?.platform === "win32" && !desktopBrowser;
   const [saving, setSaving] = useState<"skillRecorder" | "browser" | null>(null);
   const [error, setError] = useState("");
@@ -231,19 +274,16 @@ function ExperimentalFeaturesRow() {
         <div className="min-w-0">
           <div className="text-[14px] font-medium text-ink">Teach a skill</div>
           <div className="mt-0.5 text-[12px] leading-relaxed text-ink-secondary">
-            Show the workflow recorder in the sidebar.
+            Record a workflow, use /learn, or ask a supported bot to run /create-verification-skill. Every change waits for your review.
           </div>
         </div>
-        <button
-          role="switch"
-          aria-checked={skillRecorder}
+        <Switch
+          checked={skillRecorder}
           aria-label="Show Teach a skill"
           disabled={saving !== null}
           onClick={() => void toggle("skillRecorder", !skillRecorder)}
-          className={`${cnSwitch(skillRecorder)} disabled:cursor-wait disabled:opacity-50`}
-        >
-          <span className={cnKnob(skillRecorder)} />
-        </button>
+          className="disabled:cursor-wait disabled:opacity-50"
+        />
       </div>
       <div className="mt-4 flex items-center justify-between gap-4 border-t border-hairline/30 pt-4">
         <div className="min-w-0">
@@ -254,20 +294,17 @@ function ExperimentalFeaturesRow() {
                 ? "Enabled for this workspace. Each bot also has its own browser switch."
                 : "Off by default. Enable it to let supported bots use a browser tab you can watch and take over."
               : browserBlockedOnWindows
-                ? "Temporarily unavailable on Windows while Electron's production sandbox support is being verified."
-                : "Needs the OpenMausBot desktop app."}
+                ? "Not available on this Windows machine yet: install the browser engine with `openmausbot browser install`."
+                : browserUnavailableReason(state.config)}
           </div>
         </div>
-        <button
-          role="switch"
-          aria-checked={browser}
+        <Switch
+          checked={browser}
           aria-label="Enable the built-in browser"
           disabled={saving !== null || (!browser && !desktopBrowser)}
           onClick={() => void toggle("browser", !browser)}
-          className={`${cnSwitch(browser)} disabled:cursor-wait disabled:opacity-50`}
-        >
-          <span className={cnKnob(browser)} />
-        </button>
+          className="disabled:cursor-wait disabled:opacity-50"
+        />
       </div>
       {error ? <p role="alert" className="mt-2 text-[12px] text-danger">{error}</p> : null}
     </Card>
@@ -332,14 +369,7 @@ function BrowserProfilesRow() {
         }),
       });
       dispatch({ type: "configStatus", config });
-      // Packaged Electron receives the same post-commit cleanup privately
-      // from the server. Keep this idempotent fallback for split-process
-      // desktop development, where the server has no parent message port.
-      try {
-        await window.ogb?.browser?.forgetProfile?.(profile.partitionId ?? profile.id);
-      } catch {
-        setError("The profile was removed, but its local browser data could not be erased. Restart OpenMausBot before reusing that profile name.");
-      }
+      // The server clears the engine's saved session state for the profile itself.
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not delete the browser profile.");
     } finally {
@@ -428,11 +458,6 @@ function BrowserProfilesRow() {
   );
 }
 
-const cnSwitch = (on: boolean) =>
-  `relative h-6 w-11 shrink-0 rounded-full transition-colors ${on ? "bg-accent" : "bg-control"}`;
-const cnKnob = (on: boolean) =>
-  `absolute top-[3px] h-[18px] w-[18px] rounded-full bg-white transition-all ${on ? "left-[21px]" : "left-[3px]"}`;
-
 /** Writes a redacted diagnostics file to a location the user picks. The
  * report holds versions, configured-or-not booleans and the server.log tail —
  * never credential values (the desktop shell does not read secret fields). */
@@ -483,18 +508,20 @@ function DiagnosticsRow() {
 
 export function SettingsModal() {
   const { state, dispatch } = useStore();
-  const section = state.appSettingsSection;
+  const remoteActive = window.ogb?.remoteClient?.active === true;
+  const section: AppSettingsSection =
+    remoteActive || state.appSettingsSection === "remote" ? "companion" : state.appSettingsSection;
   const dialogRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
-  const visibleSections = SECTIONS.filter((entry) => sectionMatches(entry, q));
+  const visibleSections = SECTIONS.filter((entry) => (!remoteActive || entry.id === "companion") && sectionMatches(entry, q));
 
   useEffect(() => {
-    const visible = SECTIONS.filter((entry) => sectionMatches(entry, q));
+    const visible = SECTIONS.filter((entry) => (!remoteActive || entry.id === "companion") && sectionMatches(entry, q));
     if (visible.some((entry) => entry.id === section)) return;
     const first = visible[0];
     if (first) dispatch({ type: "toggleAppSettings", open: true, section: first.id });
-  }, [dispatch, q, section]);
+  }, [dispatch, q, remoteActive, section]);
 
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -554,10 +581,10 @@ export function SettingsModal() {
       >
         {/* section nav */}
         <nav className="flex w-[190px] shrink-0 flex-col gap-0.5 border-r border-hairline/40 p-3">
-          <div id="app-settings-title" className="px-2 pb-2 pt-1 text-[15px] font-semibold text-ink">
+          <div id="app-settings-title" className="shrink-0 px-2 py-3 text-[15px] font-semibold text-ink">
             Settings
           </div>
-          <div className="mb-1.5 flex items-center gap-2 rounded-lg bg-control/70 px-2.5 py-1.5">
+          <div className="mb-2 mt-1 flex shrink-0 items-center gap-2 rounded-lg bg-control/70 px-2.5 py-2">
             <Search size={14} className="shrink-0 text-ink-secondary" />
             <input
               value={query}
@@ -620,12 +647,18 @@ export function SettingsModal() {
                 <Card title="Channel turns" subtitle="Set one maximum duration for every bot turn in a channel.">
                   <RoomTurnTimeoutSettings />
                 </Card>
-                <ToolCallsRow />
-                <ExperimentalFeaturesRow />
-                <BrowserProfilesRow />
+                <LanguageRow />
+          <ToolCallsRow />
                 <UpdatesRow />
                 <DiagnosticsRow />
                 <AnalyticsRow />
+              </>
+            )}
+
+            {section === "experimental" && (
+              <>
+                <ExperimentalFeaturesRow />
+                <BrowserProfilesRow />
               </>
             )}
 
@@ -660,7 +693,12 @@ export function SettingsModal() {
               </Card>
             )}
 
-            {section === "companion" && <CompanionSection profileEmail={state.config?.profile?.email} />}
+            {section === "companion" && (
+              <>
+                <RemoteComputerSection />
+                {!remoteActive && <CompanionSection profileEmail={state.config?.profile?.email} />}
+              </>
+            )}
 
             {section === "computer" && <LocalComputerSection />}
 

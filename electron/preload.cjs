@@ -4,8 +4,7 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 // Sandboxed preloads receive Electron's restricted `require`, which cannot
 // load sibling CommonJS files. Keep this tiny predicate inline here; main's
-// privileged process uses the shared browser-platform helper.
-const browserSurfaceSupported = process.platform === "darwin" || process.platform === "linux";
+const desktopRemoteClient = process.argv.includes("--openmausbot-remote-client");
 
 let pendingPackageInstallUrl = null;
 const packageInstallListeners = new Set();
@@ -15,7 +14,15 @@ ipcRenderer.on("package:install", (_event, url) => {
   for (const listener of packageInstallListeners) listener(url);
 });
 
-contextBridge.exposeInMainWorld("ogb", {
+// The bridge is built once, then exposed in full only to the local server's
+// UI. A remote server's page (Server menu) gets the safe subset: nothing that
+// captures this screen, touches this computer's files or logins, or runs
+// helpers here. Main enforces the same rule on the sensitive channels.
+const localOrigin = process.argv.find((arg) => arg.startsWith("--omb-local-origin="))?.slice("--omb-local-origin=".length) ?? null;
+const isLocalPage = !localOrigin || location.origin === localOrigin;
+const REMOTE_SAFE = new Set(["platform", "getCapabilities", "onCapabilitiesChanged", "applySkin", "setUnreadCount", "permStatus"]);
+
+const bridge = {
   /** Host platform ("darwin" | "win32" | "linux") — for platform-aware UI. */
   platform: process.platform,
   getCapabilities: () => ipcRenderer.invoke("desktop:capabilities"),
@@ -23,6 +30,14 @@ contextBridge.exposeInMainWorld("ogb", {
     const handler = (_event, capabilities) => cb(capabilities);
     ipcRenderer.on("desktop:capabilities-changed", handler);
     return () => ipcRenderer.removeListener("desktop:capabilities-changed", handler);
+  },
+  /** Pair this desktop app to another OpenMausBot host. The bearer remains in
+   * the main process and is never returned over this bridge. */
+  remoteClient: {
+    active: desktopRemoteClient,
+    state: () => ipcRenderer.invoke("desktop-remote:state"),
+    pair: (endpoint, code) => ipcRenderer.invoke("desktop-remote:pair", endpoint, code),
+    disconnect: () => ipcRenderer.invoke("desktop-remote:disconnect"),
   },
   /** The companion sidecar: the one part of this app that listens off the
    * machine, so it runs as its own process and is off until switched on.
@@ -33,6 +48,7 @@ contextBridge.exposeInMainWorld("ogb", {
     start: () => ipcRenderer.invoke("companion:start"),
     stop: () => ipcRenderer.invoke("companion:stop"),
     keepAwake: (enabled) => ipcRenderer.invoke("companion:keep-awake", enabled),
+    refreshTailscale: () => ipcRenderer.invoke("companion:refresh-tailscale"),
     pairing: (open, expectedToken) => ipcRenderer.invoke("companion:pairing", open, expectedToken),
     cloudDesktop: (deviceId, allowed) => ipcRenderer.invoke("companion:cloud-desktop", deviceId, allowed),
     revoke: (deviceId) => ipcRenderer.invoke("companion:revoke", deviceId),
@@ -45,6 +61,12 @@ contextBridge.exposeInMainWorld("ogb", {
     verifyCode: (email, code) => ipcRenderer.invoke("companion-account:verify-code", email, code),
     retry: () => ipcRenderer.invoke("companion-account:retry"),
     signOut: () => ipcRenderer.invoke("companion-account:sign-out"),
+  },
+  /** Full/Custom and transitions out of Custom are deliberately unavailable
+   * through the loopback API. The local renderer applies those changes over
+   * the embedded server's private utilityProcess port. */
+  approvals: {
+    setMode: (botId, mode, options) => ipcRenderer.invoke("approvals:set-trusted-mode", botId, mode, options),
   },
   localControl: {
     status: () => ipcRenderer.invoke("cua:linux-status"),
@@ -157,31 +179,6 @@ contextBridge.exposeInMainWorld("ogb", {
       return () => ipcRenderer.removeListener("desktop-workspace:state", handler);
     },
   },
-  /** The built-in browser: a native page view per bot that the Browser tab
-   * positions over its own rectangle. Bots drive it through their tools; the
-   * person drives it by clicking into the view. */
-  browser: browserSurfaceSupported ? {
-    available: () => ipcRenderer.invoke("browser:available"),
-    state: (botId) => ipcRenderer.invoke("browser:state", botId),
-    layout: (botId, bounds, profile, mode) => ipcRenderer.invoke("browser:layout", botId, bounds, profile, mode),
-    navigate: (botId, url, profile) => ipcRenderer.invoke("browser:navigate", botId, url, profile),
-    back: (botId, profile) => ipcRenderer.invoke("browser:back", botId, profile),
-    forward: (botId, profile) => ipcRenderer.invoke("browser:forward", botId, profile),
-    setHumanControl: (botId, held, profile) => ipcRenderer.invoke("browser:set-human-control", botId, held, profile),
-    /** Wipe a named profile's logins, storage and cache after it is deleted. */
-    forgetProfile: (partitionId) => ipcRenderer.invoke("browser:forget-profile", partitionId),
-    close: (botId) => ipcRenderer.invoke("browser:close", botId),
-    onState: (cb) => {
-      const handler = (_event, state) => cb(state);
-      ipcRenderer.on("browser:state", handler);
-      return () => ipcRenderer.removeListener("browser:state", handler);
-    },
-    onUserInteraction: (cb) => {
-      const handler = (_event, state) => cb(state);
-      ipcRenderer.on("browser:user-interaction", handler);
-      return () => ipcRenderer.removeListener("browser:user-interaction", handler);
-    },
-  } : undefined,
   /** Native folder picker for a bot's working folder; null when cancelled. */
   pickFolder: (current) => ipcRenderer.invoke("desktop:pick-folder", current),
   /** Writes the redacted diagnostics report to a user-chosen file; resolves
@@ -218,4 +215,19 @@ contextBridge.exposeInMainWorld("ogb", {
       return () => ipcRenderer.removeListener("update:state", handler);
     },
   },
-});
+
+  /** Saved servers and the active one (Server menu). Switching, adding and
+   * forgetting are local-only: a remote page may read the list but not change
+   * where this window goes. */
+  environments: {
+    state: () => ipcRenderer.invoke("environments:state"),
+    switch: (id) => ipcRenderer.invoke("environments:switch", id),
+    addFromLink: (link) => ipcRenderer.invoke("environments:add-from-link", link),
+    forget: (id) => ipcRenderer.invoke("environments:forget", id),
+  },
+};
+
+contextBridge.exposeInMainWorld(
+  "ogb",
+  isLocalPage ? bridge : Object.fromEntries(Object.entries(bridge).filter(([key]) => REMOTE_SAFE.has(key))),
+);

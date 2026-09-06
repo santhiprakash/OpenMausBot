@@ -1,15 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, Menu } from "lucide-react";
 import { StoreProvider, useStore } from "@/state/store";
 import { Onboarding } from "@/components/Onboarding";
 import { emailGateDone, initAnalytics } from "@/lib/analytics";
-import { unreadConversationCount } from "@/lib/unread";
 import { Sidebar } from "@/components/Sidebar";
 import { ChatView } from "@/components/ChatView";
 import { GroupView } from "@/components/GroupView";
-import { SettingsPanel } from "@/components/SettingsPanel";
+import { BotSettingsDialog } from "@/components/BotSettingsDialog";
+import { RemoteAgentSettingsPanel } from "@/components/RemoteAgentSettingsPanel";
 import { PluginsPanel, preloadConnectedApps } from "@/components/PluginsPanel";
 import { ComputerPanel } from "@/components/ComputerPanel";
+import { RemoteDesktopPanel } from "@/components/remote-desktop-panel";
 import { InspectorPanel } from "@/components/InspectorPanel";
 import { SettingsModal } from "@/components/SettingsModal";
 import { UpdateBanner } from "@/components/UpdateBanner";
@@ -18,28 +19,42 @@ import { RoutinesPage } from "@/components/RoutinesPage";
 import { NoEngines } from "@/components/NoEngines";
 import { CommandPalette } from "@/components/CommandPalette";
 import { LocalVmWorkspace } from "@/components/LocalVmWorkspace";
-import { BrowserWorkspace } from "@/components/BrowserWorkspace";
 import { SkillRecorderPage } from "@/components/SkillRecorderPage";
 import { TeamMapPage } from "@/components/TeamMapPage";
-import { heldComputerControlBotIds } from "@/lib/computer-control";
+import { skillRecorderEnabled } from "@/lib/feature-flags";
+import { setLocale } from "@/lib/i18n";
 
 function Shell() {
   const { state, dispatch } = useStore();
-  const unreadCount = unreadConversationCount(state.bots, state.groups);
+  const unreadCount =
+    state.bots.filter((bot) => !bot.hidden && bot.unread).length +
+    state.groups.filter((group) => group.unread).length;
+  const remoteClient = window.ogb?.remoteClient?.active === true;
   // Mobile-only drawer state. Above md, none of these properties are emitted
   // at all — Sidebar scopes every mobile class with max-md: rather than
   // cancelling them with md:, which would still emit a translate value and
   // turn the aside into a containing block for its fixed descendants (see
   // Sidebar.tsx's className comment).
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // Apply the configured UI language the moment config arrives or changes;
+  // "" follows the system. The epoch bump re-renders extracted strings —
+  // t() reads a module variable, so React needs this nudge.
+  const language = state.config?.language ?? "";
+  const [, setLocaleEpoch] = useState(0);
+  useEffect(() => {
+    setLocale(language || globalThis.navigator?.language);
+    setLocaleEpoch((epoch) => epoch + 1);
+  }, [language]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [localVmWorkspaceBotId, setLocalVmWorkspaceBotId] = useState<string | null>(null);
   // the Browser tab, expanded into the main column (the small preview in
   // the panel hands off to this and back)
-  const [browserWorkspaceBotId, setBrowserWorkspaceBotId] = useState<string | null>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const previousViewRef = useRef(state.activeView);
+  const calendarOriginRef = useRef<"chat" | "team-map" | "skill-recorder">("chat");
   const group = state.groups.find((g) => g.id === state.selectedId);
   const bot = group ? undefined : (state.bots.find((b) => b.id === state.selectedId) ?? state.bots[0]);
+  const calendarFocus = state.activeView === "routines";
 
   // Nothing on this machine can run a bot. A missing cloud login does not
   // count — that CLI can still host a local model. Wait for the first
@@ -83,18 +98,6 @@ function Shell() {
     window.ogb?.setUnreadCount?.(unreadCount);
   }, [unreadCount]);
 
-  // Re-assert every authoritative positive hold in the process that owns the
-  // native browser. This covers initial hydration, SSE updates from another
-  // computer surface, and renderer reloads. Deliberately never mirror false:
-  // only a trusted two-phase release may open Electron's direct browser gate.
-  useEffect(() => {
-    const setter = window.ogb?.browser?.setHumanControl;
-    if (!setter) return;
-    for (const botId of heldComputerControlBotIds(state.computerControl)) {
-      void setter(botId, true).catch(() => {});
-    }
-  }, [state.computerControl]);
-
   // Warm connected-account state as soon as the local server is available.
   // The modal then opens with the correct Connect/Add account buttons and
   // quietly revalidates instead of rediscovering every account from scratch.
@@ -114,6 +117,13 @@ function Shell() {
   }, [state.selectedId, state.activeView, state.pluginsOpen, state.settingsOpen]);
 
   useEffect(() => {
+    if (state.activeView === "routines" && previousViewRef.current !== "routines") {
+      calendarOriginRef.current = previousViewRef.current;
+    }
+    previousViewRef.current = state.activeView;
+  }, [state.activeView]);
+
+  useEffect(() => {
     if (
       localVmWorkspaceBotId &&
       (state.activeView !== "chat" || state.selectedId !== localVmWorkspaceBotId)
@@ -126,25 +136,27 @@ function Shell() {
     dispatch({ type: "toggleComputer", open: false });
     setLocalVmWorkspaceBotId(botId);
   };
-  const openBrowserWorkspace = (botId: string) => {
-    dispatch({ type: "toggleComputer", open: false });
-    setBrowserWorkspaceBotId(botId);
-  };
-  const closeBrowserWorkspace = () => {
-    setBrowserWorkspaceBotId(null);
-    dispatch({ type: "toggleComputer", open: true });
-  };
-  useEffect(() => {
-    if (browserWorkspaceBotId && (state.activeView !== "chat" || state.selectedId !== browserWorkspaceBotId)) {
-      setBrowserWorkspaceBotId(null);
-    }
-  }, [browserWorkspaceBotId, state.activeView, state.selectedId]);
 
   const openComputerFromWorkspace = (botId: string) => {
     setLocalVmWorkspaceBotId(null);
     dispatch({ type: "select", id: botId });
     dispatch({ type: "toggleComputer", open: true });
   };
+
+  const closeCalendar = useCallback(() => {
+    if (calendarOriginRef.current === "team-map") {
+      dispatch({ type: "showTeamMap" });
+      return;
+    }
+    if (calendarOriginRef.current === "skill-recorder" && skillRecorderEnabled(state.config)) {
+      dispatch({ type: "showSkillRecorder" });
+      return;
+    }
+    dispatch({ type: "select", id: state.selectedId });
+  }, [dispatch, state.config, state.selectedId]);
+  const openCalendarRoom = useCallback((id: string) => {
+    dispatch({ type: "select", id });
+  }, [dispatch]);
 
   const nativeViewOverlayOpen =
     drawerOpen ||
@@ -184,7 +196,7 @@ function Shell() {
       {/* fixed-position popup, bottom-left — outside the layout flow */}
       <UpdateBanner />
       <div className="relative flex min-h-0 flex-1">
-      <button
+      {!calendarFocus && <button
         type="button"
         ref={menuButtonRef}
         aria-label="Open bot list"
@@ -193,30 +205,28 @@ function Shell() {
         className="absolute left-3 top-3 z-30 rounded-md p-1.5 text-ink-secondary hover:bg-raised hover:text-ink md:hidden"
       >
         <Menu size={18} />
-      </button>
-      {drawerOpen && (
+      </button>}
+      {drawerOpen && !calendarFocus && (
         <div
           aria-hidden
           onMouseDown={(e) => e.target === e.currentTarget && setDrawerOpen(false)}
           className="absolute inset-0 z-30 bg-black/50 md:hidden"
         />
       )}
-      <Sidebar
+      {!calendarFocus && <Sidebar
         open={drawerOpen}
         onClose={() => {
           setDrawerOpen(false);
           menuButtonRef.current?.focus();
         }}
-      />
+      />}
       {state.activeView === "team-map" ? (
         <TeamMapPage />
       ) : state.activeView === "routines" ? (
-        <RoutinesPage />
-      ) : state.activeView === "skill-recorder" ? (
+        <RoutinesPage onBack={closeCalendar} onOpenRoom={openCalendarRoom} />
+      ) : !remoteClient && state.activeView === "skill-recorder" ? (
         <SkillRecorderPage />
-      ) : browserWorkspaceBotId && bot && bot.id === browserWorkspaceBotId ? (
-        <BrowserWorkspace bot={bot} onClose={closeBrowserWorkspace} />
-      ) : localVmWorkspaceBotId ? (
+      ) : !remoteClient && localVmWorkspaceBotId ? (
         <LocalVmWorkspace
           primaryBotId={localVmWorkspaceBotId}
           overlayOpen={nativeViewOverlayOpen}
@@ -242,11 +252,23 @@ function Shell() {
           )}
         </main>
       )}
-      {state.settingsOpen && bot && <SettingsPanel bot={bot} />}
-      {state.computerOpen && bot && (
-        <ComputerPanel bot={bot} onOpenVmWorkspace={openLocalVmWorkspace} onExpandBrowser={openBrowserWorkspace} />
+      {state.settingsOpen && bot && (
+        remoteClient
+          ? <RemoteAgentSettingsPanel bot={bot} />
+          : <BotSettingsDialog key={bot.id} bot={bot} />
       )}
-      {state.inspectorOpen && bot && <InspectorPanel bot={bot} />}
+      {state.computerOpen && bot && (
+        remoteClient ? (
+          <RemoteDesktopPanel key={bot.id} bot={bot} />
+        ) : (
+          <ComputerPanel
+            key={bot.id}
+            bot={bot}
+            onOpenVmWorkspace={openLocalVmWorkspace}
+          />
+        )
+      )}
+      {!remoteClient && state.inspectorOpen && bot && <InspectorPanel bot={bot} />}
       {state.appSettingsOpen && <SettingsModal />}
       {state.pluginsOpen && <PluginsPanel />}
       {/* mounted after the modals: same z-50 tier, so DOM order keeps the
@@ -258,7 +280,7 @@ function Shell() {
 }
 
 export default function App() {
-  const [gated, setGated] = useState(() => !emailGateDone());
+  const [gated, setGated] = useState(() => window.ogb?.remoteClient?.active !== true && !emailGateDone());
   useEffect(() => {
     initAnalytics();
   }, []);

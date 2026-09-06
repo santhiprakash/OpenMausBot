@@ -1,0 +1,18 @@
+{
+  "noEngines.title": "Installez un moteur d'IA pour commencer",
+  "noEngines.intro": "{app} n'embarque pas de modèle : vos bots s'appuient sur une CLI d'IA installée sur cet ordinateur, avec votre session existante. Configurez l'une d'elles et vos bots prennent vie.",
+  "engines.cloud": "Cloud",
+  "engines.local": "Local",
+  "common.checkAgain": "Revérifier",
+  "common.checking": "Vérification…",
+  "approval.held.native": "Le fournisseur exige votre approbation pour cette action.",
+  "approval.held.sandbox": "Ceci modifie le bac à sable du fournisseur : seul Full access peut l’approuver automatiquement.",
+  "approval.held.localComputer": "Le contrôle de votre ordinateur n’est jamais couvert par « Toujours autoriser », c’est donc à vous de décider.",
+  "approval.held.unattended": "Un webhook ou un autre bot a lancé ce tour, Approve for me est donc en pause et chaque action demande.",
+  "approval.held.unattendedFullAccess": "Un webhook ou un autre bot a lancé ce tour, Approve for me est donc en pause et chaque action demande. Full access continue de fonctionner sans surveillance.",
+  "approval.held.destructive": "Ceci semble destructeur, Approve for me s’est donc arrêté pour demander.",
+  "approval.held.sensitive": "Ceci touche à des identifiants, Approve for me s’est donc arrêté pour demander.",
+  "approval.held.needsYou": "Cette action a besoin de vous, Approve for me s’est donc arrêté pour demander.",
+  "approval.held.undeliveredFull": "Full access n’a pas pu délivrer cette approbation.",
+  "approval.held.undelivered": "Approve for me n’a pas pu répondre à celle-ci."
+}

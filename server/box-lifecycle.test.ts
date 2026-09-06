@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 describe("cloud computer lifecycle", () => {
   let api: Server;
   let sleepBox: typeof import("./box.ts").sleepBox;
+  let execOnBox: typeof import("./box.ts").execOnBox;
   const requests: Array<{ method: string; path: string; command?: string }> = [];
   const botId = "browser-session-test";
 
@@ -21,7 +22,9 @@ describe("cloud computer lifecycle", () => {
         requests.push({ method: req.method ?? "GET", path: url.pathname, command: parsed.command });
         res.writeHead(200, { "content-type": "application/json" });
         if (url.pathname === "/api/box/v1/boxes") {
-          res.end(JSON.stringify({ boxes: [{ id: "box-1", name: machineName, state: "ready" }] }));
+          res.end(JSON.stringify({ boxes: [{ id: "bx_23456789", name: machineName, state: "ready" }] }));
+        } else if (url.pathname === "/api/box/v1/boxes/bx_23456789" && req.method === "GET") {
+          res.end(JSON.stringify({ ok: true, box: { id: "bx_23456789", name: machineName, state: "ready" } }));
         } else if (url.pathname.endsWith("/commands")) {
           res.end(JSON.stringify({ exitCode: 0, stdout: "", stderr: "" }));
         } else {
@@ -33,7 +36,7 @@ describe("cloud computer lifecycle", () => {
     const port = (api.address() as any).port;
     vi.stubEnv("OMB_BOX_API", `http://127.0.0.1:${port}/api/box/v1`);
     vi.resetModules();
-    ({ sleepBox } = await import("./box.ts"));
+    ({ execOnBox, sleepBox } = await import("./box.ts"));
   });
 
   afterAll(async () => {
@@ -50,5 +53,22 @@ describe("cloud computer lifecycle", () => {
     expect(stopIndex).toBeGreaterThan(commandIndex);
     expect(requests[commandIndex]?.command).toContain("kill -TERM");
     expect(requests[commandIndex]?.command).toContain("pgrep -o -x");
+  });
+
+  it("runs the owner console in the same clean environment as the bot tool", async () => {
+    requests.length = 0;
+    await execOnBox({ box: { token: "box_test" } } as any, botId, `printf '%s' "$BOX_TOKEN"`);
+
+    const command = requests.find((request) => request.path.endsWith("/commands"))?.command ?? "";
+    expect(command).toContain('exec env -i HOME="$HOME"');
+    expect(command).toContain("/bin/bash -c");
+  });
+
+  it("rejects an oversized owner-console command before contacting the provider", async () => {
+    requests.length = 0;
+    await expect(
+      execOnBox({ box: { token: "box_test" } } as any, botId, "x".repeat(4001)),
+    ).rejects.toThrow("maximum 4000 characters");
+    expect(requests).toHaveLength(0);
   });
 });

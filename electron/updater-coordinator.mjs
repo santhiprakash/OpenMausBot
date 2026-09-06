@@ -1,10 +1,23 @@
-export function createUpdaterCoordinator(updater, setState) {
+// `handOffInstall` swaps the terminal step: instead of quitting and letting
+// electron-updater run the installer, the downloaded file is handed to the
+// user. Ubuntu system packages use it — see electron/updater.mjs for why a
+// chat app must not run dpkg itself. Everything before the install is shared.
+// It receives the staged paths and resolves with an optional state patch
+// describing what is left to do, which the card renders.
+export function createUpdaterCoordinator(updater, setState, { handOffInstall = null } = {}) {
   let checkOperation = null;
+  // Set from downloadUpdate's resolution: the paths electron-updater staged.
+  // Only the hand-off needs them; quitAndInstall reads its own copy.
+  let downloadedFiles = null;
   let downloadOperation = null;
   let installOperation = null;
+  // A staged update, install hand-off, or failed user action remains useful
+  // until the user acts again. Hourly checks must not replace its controls.
+  let actionOwnsState = false;
   const routedErrors = new WeakSet();
 
   const routeError = (manual, error) => {
+    actionOwnsState = manual;
     if (error instanceof Error) routedErrors.add(error);
     if (downloadOperation) downloadOperation.failed = true;
     if (checkOperation) checkOperation.failed = true;
@@ -26,7 +39,7 @@ export function createUpdaterCoordinator(updater, setState) {
   }
 
   function checkOwnsState() {
-    return !downloadOperation && !checkOperation?.supersededByDownload;
+    return !actionOwnsState && !installOperation && !downloadOperation && !checkOperation?.supersededByDownload;
   }
 
   updater.on("checking-for-update", () => {
@@ -45,6 +58,9 @@ export function createUpdaterCoordinator(updater, setState) {
   // this listener a Squirrel.Mac failure leaves the renderer on "Restarting"
   // forever because quitAndInstall itself returns void.
   updater.on("error", (error) => {
+    // Shared error events do not identify their operation. If a download
+    // overtook a check, let their individual promises route failures instead.
+    if (checkOperation?.supersededByDownload && !installOperation) return;
     const manual = Boolean(installOperation || downloadOperation || checkOperation?.manual);
     routeError(manual, error);
   });
@@ -59,16 +75,19 @@ export function createUpdaterCoordinator(updater, setState) {
       downloadOperation.downloadedInfo = info;
       return;
     }
+    actionOwnsState = true;
     setState({ status: "downloaded", version: info?.version });
   });
 
   function check(manual = false) {
+    if (installOperation || (!manual && actionOwnsState)) return Promise.resolve();
     if (checkOperation) {
       // A manual caller upgrades the shared operation; a timer never downgrades it.
       if (manual) checkOperation.manual = true;
       return checkOperation.promise;
     }
 
+    if (manual) actionOwnsState = false;
     const operation = { manual, supersededByDownload: Boolean(downloadOperation), failed: false, promise: null };
     checkOperation = operation;
     try {
@@ -101,7 +120,11 @@ export function createUpdaterCoordinator(updater, setState) {
     try {
       operation.promise = Promise.resolve(updater.downloadUpdate())
         .then((result) => {
+          if (!operation.failed) {
+            downloadedFiles = Array.isArray(result) ? result.filter((file) => typeof file === "string") : null;
+          }
           if (!operation.failed && operation.downloadedInfo) {
+            actionOwnsState = true;
             setState({ status: "downloaded", version: operation.downloadedInfo?.version });
           }
           return result;
@@ -120,6 +143,11 @@ export function createUpdaterCoordinator(updater, setState) {
 
   function install() {
     if (installOperation) return;
+    actionOwnsState = true;
+    if (handOffInstall) {
+      handOff();
+      return;
+    }
     const operation = { failed: false, timer: null };
     installOperation = operation;
     setState({ status: "installing" });
@@ -139,6 +167,26 @@ export function createUpdaterCoordinator(updater, setState) {
       }, 2 * 60 * 1000);
       operation.timer.unref?.();
     }
+  }
+
+  // The platform owns the install from here: a terminal opens with the
+  // command on the clipboard and the user finishes there. No quit — the
+  // running app stays usable, and the new version is picked up next launch.
+  function handOff() {
+    const operation = { failed: false, timer: null };
+    installOperation = operation;
+    setState({ status: "installing" });
+    Promise.resolve()
+      .then(() => handOffInstall(downloadedFiles))
+      .then((patch) => {
+        if (installOperation !== operation) return;
+        installOperation = null;
+        setState({ status: "handed-off", ...patch });
+      })
+      .catch((error) => {
+        if (installOperation !== operation) return;
+        routeError(true, error);
+      });
   }
 
   return { check, download, install };

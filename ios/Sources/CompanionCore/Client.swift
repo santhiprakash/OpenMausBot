@@ -2,9 +2,10 @@
 //
 // Everything the phone can do to the harness, in one place. The rules it
 // encodes come from the default-deny policy in `companion/src/routes.ts`: a
-// paired phone may chat, answer approvals, and read rooms — it may not touch
-// credentials, pairing, or the Local VM. Those routes are simply absent here
-// rather than present and failing at runtime.
+// paired phone may chat, answer approvals, and read rooms. Credential values
+// are the narrow exception: this client can transport an HPKE envelope whose
+// plaintext only the QR-paired Electron process can open. Pairing management
+// and the Local VM remain absent rather than failing at runtime.
 import Foundation
 
 /// Where a companion connects, and with what. The token is *not* held here
@@ -38,6 +39,18 @@ public struct Connection: Codable, Hashable, Identifiable, Sendable {
     /// LAN or Bonjour origin for local pairing. Absent alongside a nil kind
     /// policy on connections saved before route consent existed.
     public var allowedLocalRouteURLs: Set<String>?
+    /// P-256 HPKE recipient point learned only from the camera-scanned QR.
+    /// It is public key material; the phone never receives the private key.
+    public var secretPublicKey: String?
+    /// Sidecar device identity returned after redemption. Bound into every
+    /// credential envelope and checked against the authenticated bearer.
+    public var companionDeviceId: String?
+    /// Set when this connection was paired against the server's own sessions
+    /// (`openmausbot serve` / the Docker stack) rather than the desktop's
+    /// companion sidecar: the bearer is an `omb_sess_` token with the client
+    /// scope, so what the app may administer differs. Absent on connections
+    /// saved before servers could be paired directly.
+    public var serverEnvironmentId: String?
 
     public init(
         id: String = UUID().uuidString,
@@ -48,7 +61,10 @@ public struct Connection: Codable, Hashable, Identifiable, Sendable {
         activeEndpoint: CompanionEndpoint? = nil,
         endpoints: [CompanionEndpoint]? = nil,
         allowedRouteKinds: Set<CompanionEndpointKind>? = nil,
-        allowedLocalRouteURLs: Set<String>? = nil
+        allowedLocalRouteURLs: Set<String>? = nil,
+        secretPublicKey: String? = nil,
+        companionDeviceId: String? = nil,
+        serverEnvironmentId: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -59,7 +75,15 @@ public struct Connection: Codable, Hashable, Identifiable, Sendable {
         self.endpoints = endpoints
         self.allowedRouteKinds = allowedRouteKinds
         self.allowedLocalRouteURLs = allowedLocalRouteURLs
+        self.secretPublicKey = secretPublicKey
+        self.companionDeviceId = companionDeviceId
+        self.serverEnvironmentId = serverEnvironmentId
     }
+
+    /// Paired with a server directly (client scope): chat, approvals and
+    /// reading are in; creating bots, changing models, connected apps and
+    /// cloud computers are the owner's, done on the server's own UI.
+    public var pairedWithServer: Bool { serverEnvironmentId != nil }
 
     /// The representation `URLComponents.host` accepts for a literal IPv6
     /// address. It adds brackets exactly once and leaves DNS/IPv4 names alone.
@@ -196,6 +220,7 @@ public struct PairingInvite: Equatable, Sendable {
     }
 
     public static func parse(_ url: URL) -> PairingInvite? {
+        if let server = parseServerLink(url) { return server }
         guard url.scheme?.lowercased() == "openmausbot",
               url.host?.lowercased() == "pair",
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
@@ -235,6 +260,10 @@ public struct PairingInvite: Equatable, Sendable {
             connection.endpoints = endpoints
             connection = connection.dialing(endpoints[0])
         }
+        if let secretKey = values["secretKey"] {
+            guard let normalized = PhoneSecretCrypto.normalizedPublicKey(secretKey) else { return nil }
+            connection.secretPublicKey = normalized
+        }
         connection.establishRoutePolicyFromInvite()
         return PairingInvite(connection: connection, credential: credential)
     }
@@ -268,6 +297,44 @@ public struct PairingInvite: Equatable, Sendable {
         var seen = Set<String>()
         let unique = stable.filter { seen.insert($0.url).inserted }
         return unique.isEmpty ? nil : unique
+    }
+
+    /// `https://host/pair#code=ABCD-EFGH-JKLM`: the link a server prints
+    /// (`openmausbot serve`, `openmausbot pair`, the Docker stack). It pairs
+    /// against the server's own sessions, not the companion sidecar. The code
+    /// rides in the fragment, which never reaches a server in a request, and
+    /// the server takes it with or without dashes.
+    static func parseServerLink(_ url: URL) -> PairingInvite? {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              let host = components.host, !host.isEmpty,
+              components.path == "/pair",
+              components.query == nil,
+              let fragment = components.fragment
+        else { return nil }
+        var values: [String: String] = [:]
+        for pair in fragment.split(separator: "&") {
+            let parts = pair.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2, values[String(parts[0])] == nil else { return nil }
+            values[String(parts[0])] = String(parts[1]).removingPercentEncoding ?? String(parts[1])
+        }
+        guard let raw = values["code"], let code = normalizedServerCode(raw) else { return nil }
+        var origin = components
+        origin.path = ""
+        origin.fragment = nil
+        guard let originString = origin.string, let connection = Connection.parse(originString) else { return nil }
+        return PairingInvite(connection: connection, credential: code)
+    }
+
+    /// A server pairing code: 12 characters from a confusion-free alphabet,
+    /// shown as three dashed groups. Only the shape is checked here; a
+    /// mistyped code fails at the server with its own message. Six-digit
+    /// codes and `omb_pair_` tokens are the companion's and return nil.
+    public static func normalizedServerCode(_ raw: String) -> String? {
+        let cleaned = raw.uppercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
+        guard cleaned.count == 12, !cleaned.allSatisfy(\.isNumber) else { return nil }
+        return cleaned
     }
 
     private static func credential(from values: [String: String]) -> String? {
@@ -351,15 +418,136 @@ public enum APIError: Error, LocalizedError, Sendable {
     }
 }
 
+/// The exact conversation a retriable send belongs to. Carrying the thread
+/// as well as the bot/room id prevents a Share Extension retry from landing
+/// in a different task if the desktop switches tasks while iOS is suspended.
+public enum MessageDestination: Hashable, Sendable {
+    case bot(id: String, threadId: String)
+    case room(id: String, threadId: String)
+}
+
+public enum SharedAttachmentKind: Hashable, Sendable {
+    case image
+    case file
+}
+
+/// A file which has already crossed to the Mac. The path is deliberately the
+/// server's absolute path rather than the phone's temporary provider URL.
+public struct SharedAttachmentReference: Hashable, Sendable {
+    public let path: String
+    public let kind: SharedAttachmentKind
+    public let displayName: String?
+
+    public init(path: String, kind: SharedAttachmentKind, displayName: String? = nil) {
+        self.path = path
+        self.kind = kind
+        self.displayName = displayName
+    }
+}
+
+/// Builds the same tagged prompt as the desktop composer without making the
+/// extension know about server paths or XML escaping. Kept pure so share-sheet
+/// input can be tested without loading UIKit or an extension context.
+public enum SharedMessageComposer {
+    public static func compose(
+        instruction: String,
+        text: [String],
+        urls: [URL],
+        attachments: [SharedAttachmentReference]
+    ) -> String {
+        var parts: [String] = []
+        appendNonempty(instruction, to: &parts)
+        var seenText = Set<String>()
+        for value in text {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty, seenText.insert(trimmed).inserted { parts.append(trimmed) }
+        }
+
+        var seenURLs = Set<String>()
+        for url in urls {
+            let value = url.absoluteString
+            if seenURLs.insert(value).inserted { appendNonempty(value, to: &parts) }
+        }
+
+        for attachment in attachments {
+            let tag = attachment.kind == .image ? "attached-image" : "attached-file"
+            if let displayName = attachment.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !displayName.isEmpty {
+                parts.append(
+                    "<\(tag) path=\"\(escapeAttribute(attachment.path))\" " +
+                    "name=\"\(escapeAttribute(displayName))\" />"
+                )
+            } else {
+                parts.append("<\(tag) path=\"\(escapeAttribute(attachment.path))\" />")
+            }
+        }
+        return parts.joined(separator: "\n\n")
+    }
+
+    private static func appendNonempty(_ value: String, to parts: inout [String]) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { parts.append(trimmed) }
+    }
+
+    private static func escapeAttribute(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\t", with: "&#9;")
+            .replacingOccurrences(of: "\r", with: "&#13;")
+            .replacingOccurrences(of: "\n", with: "&#10;")
+    }
+}
+
+private struct FileUploadResponse: Decodable {
+    let path: String
+    let name: String
+    let mime: String
+    let bytes: Int
+}
+
+public struct UploadedFile: Hashable, Sendable {
+    public let path: String
+    public let name: String
+
+    public init(path: String, name: String) {
+        self.path = path
+        self.name = name
+    }
+}
+
+private struct InstanceCapabilityResponse: Decodable {
+    struct Entry: Decodable {
+        struct Capabilities: Decodable { let images: Bool? }
+        let instanceId: String
+        let capabilities: Capabilities?
+    }
+
+    let instances: [Entry]
+}
+
 public struct CompanionClient: Sendable {
+    public static let maximumImageUploadBytes = AttachmentPolicy.maximumImageBytes
+    public static let maximumFileUploadBytes = AttachmentPolicy.maximumFileBytes
+    public static let maximumFileDownloadBytes = AttachmentPolicy.maximumFileBytes
+
     public let connection: Connection
     private let token: String?
     private let session: URLSession
+    private let requestTimeout: TimeInterval
 
-    public init(connection: Connection, token: String?, session: URLSession = .shared) {
+    public init(
+        connection: Connection,
+        token: String?,
+        session: URLSession = .shared,
+        requestTimeout: TimeInterval = 20
+    ) {
         self.connection = connection
         self.token = token
         self.session = session
+        self.requestTimeout = min(max(requestTimeout, 1), 150)
     }
 
     // MARK: - Requests
@@ -378,7 +566,7 @@ public struct CompanionClient: Sendable {
         // network; if it does not answer in twenty seconds it is not going
         // to. The default sixty leaves someone watching a spinner long
         // enough to assume the app is broken rather than the address wrong.
-        request.timeoutInterval = 20
+        request.timeoutInterval = requestTimeout
         if let token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
@@ -467,6 +655,38 @@ public struct CompanionClient: Sendable {
         // address must not consume the default twenty-second API deadline.
         pairRequest.timeoutInterval = 8
         return try await client.send(pairRequest, as: PairResponse.self)
+    }
+
+    /// Pair against the server's own sessions (`POST /api/auth/pair`). The
+    /// answer is a bearer for the client scope; no cookie is asked for, so
+    /// the token is the app's alone. `attemptId` makes a retry after a lost
+    /// response idempotent for a minute, like the companion's request id.
+    public static func pairWithServer(
+        connection: Connection,
+        code: String,
+        label: String,
+        attemptId: String = UUID().uuidString,
+        session: URLSession = .shared
+    ) async throws -> ServerPairResponse {
+        let client = CompanionClient(connection: connection, token: nil, session: session)
+        var request = try client.makeRequest(
+            "POST",
+            "/api/auth/pair",
+            body: ["code": code, "label": label, "attemptId": attemptId]
+        )
+        request.timeoutInterval = 8
+        return try await client.send(request, as: ServerPairResponse.self)
+    }
+
+    /// The server's public descriptor: reachable before pairing, and the way
+    /// to notice that the address now belongs to a different server.
+    public func environment() async throws -> ServerEnvironment {
+        try await send(makeRequest("GET", "/.well-known/openmausbot/environment"), as: ServerEnvironment.self)
+    }
+
+    /// End this session on the server (server-paired connections only).
+    public func logout() async throws {
+        try await send(makeRequest("POST", "/api/auth/logout"))
     }
 
     /// Resolve the multi-address invite before consuming its credential.
@@ -648,6 +868,19 @@ public struct CompanionClient: Sendable {
         try await send(try makeRequest("GET", "/api/instances"), as: InstanceList.self).instances
     }
 
+    /// The image capability is intentionally queried independently from the
+    /// general Instance model: older servers omit it, which must mean false
+    /// for a share that would otherwise send an unreadable image prompt.
+    public func imageCapableInstanceIDs() async throws -> Set<String> {
+        let response = try await send(
+            try makeRequest("GET", "/api/instances"),
+            as: InstanceCapabilityResponse.self
+        )
+        return Set(response.instances.compactMap { entry in
+            entry.capabilities?.images == true ? entry.instanceId : nil
+        })
+    }
+
     public func config() async throws -> ConfigStatus {
         try await send(try makeRequest("GET", "/api/config"), as: ConfigStatus.self)
     }
@@ -671,6 +904,101 @@ public struct CompanionClient: Sendable {
         let (data, response) = try await perform(imageRequest)
         try Self.check(response, data)
         return data
+    }
+
+    /// Fetch an app-owned file mentioned by one transcript message. The path
+    /// still names the file on the paired computer, so it is sent in an
+    /// authenticated JSON body rather than placed in the URL. The server
+    /// verifies both message provenance and its attachment roots.
+    public func downloadFile(
+        threadId: String,
+        messageId: String,
+        path rawPath: String
+    ) async throws -> DownloadedFile {
+        guard Self.validRouteID(threadId), Self.validRouteID(messageId),
+              case let .desktopFile(path) = LocalMessageLink.resolve(rawPath)
+        else { throw APIError.badURL }
+        let request = try makeRequest(
+            "POST",
+            "/api/threads/\(threadId)/messages/\(messageId)/file",
+            body: ["path": path]
+        )
+        let (data, response) = try await perform(request)
+        try Self.check(response, data)
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.transport("The computer sent something this app couldn't read.")
+        }
+        if http.expectedContentLength > Self.maximumFileDownloadBytes ||
+            data.count > Self.maximumFileDownloadBytes {
+            throw APIError.transport("That file is larger than 25 MB.")
+        }
+        let disposition = http.value(forHTTPHeaderField: "Content-Disposition")
+        let filename = Self.downloadFilename(from: disposition, fallbackPath: path)
+        let rawContentType = http.value(forHTTPHeaderField: "Content-Type") ?? ""
+        let contentType = AttachmentPolicy.validMIME(rawContentType)
+            ? AttachmentPolicy.normalizedMIME(rawContentType)
+            : "application/octet-stream"
+        return DownloadedFile(data: data, filename: filename, contentType: contentType)
+    }
+
+    private static func downloadFilename(from disposition: String?, fallbackPath: String) -> String {
+        let parameters = disposition?.split(separator: ";").map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        } ?? []
+        let encoded = parameters.first(where: { $0.lowercased().hasPrefix("filename*=") })
+            .map { String($0.dropFirst("filename*=".count)) }
+        let ordinary = parameters.first(where: { $0.lowercased().hasPrefix("filename=") })
+            .map { String($0.dropFirst("filename=".count)) }
+        let decodedEncoded = encoded.flatMap { value -> String? in
+            let unquoted = value.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            let payload = unquoted.split(separator: "'", maxSplits: 2, omittingEmptySubsequences: false)
+            let encodedValue = payload.count == 3 ? String(payload[2]) : unquoted
+            return encodedValue.removingPercentEncoding
+        }
+        let candidate = decodedEncoded
+            ?? ordinary?.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            ?? fallbackPath.components(separatedBy: CharacterSet(charactersIn: "/\\"))
+                .last(where: { !$0.isEmpty })
+            ?? "file"
+        let basename = candidate.components(separatedBy: CharacterSet(charactersIn: "/\\"))
+            .last(where: { !$0.isEmpty }) ?? "file"
+        let cleaned = basename.unicodeScalars.map { scalar -> String in
+            let code = scalar.value
+            let isBidiControl = (0x202A...0x202E).contains(code) || (0x2066...0x2069).contains(code)
+            return CharacterSet.controlCharacters.contains(scalar) || isBidiControl ? " " : String(scalar)
+        }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+        let shortened = boundedFilename(cleaned)
+        return shortened.isEmpty || shortened == "." || shortened == ".." ? "file" : shortened
+    }
+
+    /// APFS limits one path component by bytes, not Swift characters. Keep
+    /// enough room for the preview cache's own suffix and retain a useful
+    /// extension whenever it fits.
+    private static func boundedFilename(_ value: String, maximumUTF8Bytes: Int = 180) -> String {
+        guard value.utf8.count > maximumUTF8Bytes else { return value }
+        let pathExtension = (value as NSString).pathExtension
+        let suffix = pathExtension.isEmpty ? "" : ".\(pathExtension)"
+        if !suffix.isEmpty,
+           suffix.utf8.count <= 32,
+           suffix.utf8.count < maximumUTF8Bytes {
+            let stem = String(value.dropLast(suffix.count))
+            let prefix = utf8Prefix(stem, maximumBytes: maximumUTF8Bytes - suffix.utf8.count)
+            if !prefix.isEmpty { return prefix + suffix }
+        }
+        return utf8Prefix(value, maximumBytes: maximumUTF8Bytes)
+    }
+
+    private static func utf8Prefix(_ value: String, maximumBytes: Int) -> String {
+        var result = ""
+        var bytes = 0
+        for character in value {
+            let piece = String(character)
+            let pieceBytes = piece.utf8.count
+            guard bytes + pieceBytes <= maximumBytes else { break }
+            result.append(character)
+            bytes += pieceBytes
+        }
+        return result
     }
 
     /// Fetch an app-owned avatar with the paired-device bearer token. Custom
@@ -710,6 +1038,13 @@ public struct CompanionClient: Sendable {
         return (response.routines, response.runs)
     }
 
+    /// A read-only summary of one bot: who it is, what it does and won't do,
+    /// and its recent activity. No settings, no transcript.
+    public func overview(botId: String) async throws -> BotOverview {
+        guard Self.validRouteID(botId) else { throw APIError.badURL }
+        return try await send(try makeRequest("GET", "/api/bots/\(botId)/overview"), as: BotOverview.self)
+    }
+
     // MARK: - Doing
 
     /// Make a new bot. The harness picks its name, colour and greeting — the
@@ -729,18 +1064,108 @@ public struct CompanionClient: Sendable {
         ).bot
     }
 
-    public func uploadAvatar(data: Data, mime: String) async throws -> String {
-        let allowed = ["image/png", "image/jpeg", "image/gif", "image/webp"]
-        guard allowed.contains(mime), data.count <= 10 * 1_024 * 1_024 else {
+    /// Change only the engine, model and optional reasoning effort. This uses
+    /// the companion's narrow model route rather than the desktop's general
+    /// bot PATCH, which also owns execution policy and computer settings.
+    public func updateModel(botId: String, selection: ModelSelection) async throws -> Bot {
+        guard Self.validRouteID(botId) else { throw APIError.badURL }
+        return try await send(
+            try makeRequest("PATCH", "/api/bots/\(botId)/model", encodedBody: selection),
+            as: BotResponse.self
+        ).bot
+    }
+
+    /// Upload raw image bytes and return the path the agent can open on its
+    /// Mac. This is also the primitive used by avatar upload and sharing.
+    public func uploadImage(
+        data: Data,
+        mime: String,
+        uploadId: String? = nil
+    ) async throws -> String {
+        let normalizedMime = mime.lowercased()
+        guard Self.validUploadID(uploadId) else { throw APIError.badURL }
+        guard AttachmentPolicy.imageMIMETypes.contains(normalizedMime),
+              data.count <= Self.maximumImageUploadBytes
+        else {
             throw APIError.transport("Choose a PNG, JPEG, GIF, or WebP image up to 10 MB.")
         }
-        var request = try makeRequest("POST", "/api/attachments")
-        request.setValue(mime, forHTTPHeaderField: "Content-Type")
+        var request = try makeRequest(
+            "POST",
+            "/api/attachments",
+            query: uploadId.map { [URLQueryItem(name: "uploadId", value: $0)] } ?? []
+        )
+        request.setValue(normalizedMime, forHTTPHeaderField: "Content-Type")
         request.httpBody = data
         let saved = try await send(request, as: AttachmentResponse.self)
-        let name = URL(fileURLWithPath: saved.path).lastPathComponent
+        guard Self.validUploadedPath(saved.path) else {
+            throw APIError.transport("The uploaded image could not be used.")
+        }
+        return saved.path
+    }
+
+    public func uploadAvatar(data: Data, mime: String) async throws -> String {
+        let path = try await uploadImage(data: data, mime: mime)
+        let name = URL(fileURLWithPath: path).lastPathComponent
         guard !name.isEmpty, !name.contains("/") else { throw APIError.transport("The uploaded image could not be used.") }
         return "/api/attachments/\(name)"
+    }
+
+    /// Upload an ordinary document as raw bytes. The filename is display
+    /// metadata only; the server chooses the generated path on the Mac.
+    public func uploadFile(
+        data: Data,
+        name: String,
+        mime: String,
+        uploadId: String? = nil
+    ) async throws -> UploadedFile {
+        let displayName = URL(fileURLWithPath: name).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedMime = mime.lowercased()
+        guard Self.validUploadID(uploadId) else { throw APIError.badURL }
+        guard !displayName.isEmpty,
+              displayName.utf8.count <= 255,
+              Self.validUploadMime(normalizedMime),
+              data.count <= Self.maximumFileUploadBytes
+        else {
+            throw APIError.transport("Choose a file up to 25 MB with a valid filename.")
+        }
+        var request = try makeRequest(
+            "POST",
+            "/api/files",
+            query: [URLQueryItem(name: "name", value: displayName)]
+                + (uploadId.map { [URLQueryItem(name: "uploadId", value: $0)] } ?? [])
+        )
+        request.setValue(normalizedMime, forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+        let saved = try await send(request, as: FileUploadResponse.self)
+        let returnedName = saved.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.validUploadedPath(saved.path), Self.validUploadedName(returnedName) else {
+            throw APIError.transport("The uploaded file could not be used.")
+        }
+        return UploadedFile(path: saved.path, name: returnedName)
+    }
+
+    private static func validUploadMime(_ mime: String) -> Bool {
+        guard !mime.isEmpty, mime.utf8.count <= 127, mime.contains("/") else { return false }
+        return mime.utf8.allSatisfy { byte in
+            (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
+                || [33, 35, 36, 38, 43, 45, 46, 47, 94, 95].contains(byte)
+        }
+    }
+
+    private static func validUploadID(_ uploadId: String?) -> Bool {
+        guard let uploadId else { return true }
+        return UUID(uuidString: uploadId)?.uuidString == uploadId.uppercased()
+    }
+
+    private static func validUploadedPath(_ path: String) -> Bool {
+        !path.isEmpty && path.utf8.count <= 4_096 && !path.contains("\0")
+    }
+
+    private static func validUploadedName(_ name: String) -> Bool {
+        !name.isEmpty && name.utf8.count <= 255
+            && !name.contains("/") && !name.contains("\\")
+            && !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
     }
 
     public func generateAvatar(botId: String, prompt: String) async throws -> Bot {
@@ -808,10 +1233,14 @@ public struct CompanionClient: Sendable {
         if let at = input.schedule.at { schedule["at"] = at }
         if let time = input.schedule.time { schedule["time"] = time }
         if let weekdays = input.schedule.weekdays { schedule["weekdays"] = weekdays }
+        if let everyMinutes = input.schedule.everyMinutes { schedule["everyMinutes"] = everyMinutes }
+        if let anchorAt = input.schedule.anchorAt { schedule["anchorAt"] = anchorAt }
         var body: [String: Any] = [
             "name": input.name, "prompt": input.prompt, "botId": input.botId,
             "runOn": input.runOn, "schedule": schedule, "durationMinutes": input.durationMinutes,
         ]
+        if let timeoutMinutes = input.timeoutMinutes { body["timeoutMinutes"] = timeoutMinutes }
+        else if input.clearTimeout { body["timeoutMinutes"] = NSNull() }
         if let enabled = input.enabled { body["enabled"] = enabled }
         return body
     }
@@ -824,6 +1253,21 @@ public struct CompanionClient: Sendable {
         return try await send(try makeRequest("POST", "/api/groups", body: body), as: CreatedRoom.self).group
     }
 
+    /// File several bots under one shared desktop/mobile sidebar heading.
+    /// This uses a narrow batch route instead of the desktop's general bot
+    /// PATCH, so a paired phone can change organization without gaining any
+    /// execution-policy controls and without leaving a half-created section.
+    public func assignSection(name: String, botIds: [String]) async throws -> [Bot] {
+        try await send(
+            try makeRequest(
+                "POST",
+                "/api/sidebar-sections",
+                body: ["name": name, "botIds": botIds]
+            ),
+            as: SidebarSectionResponse.self
+        ).bots
+    }
+
     public func send(text: String, toBot botId: String) async throws {
         try await send(try makeRequest("POST", "/api/bots/\(botId)/messages", body: ["text": text]))
     }
@@ -832,14 +1276,60 @@ public struct CompanionClient: Sendable {
         try await send(try makeRequest("POST", "/api/groups/\(groupId)/messages", body: ["text": text]))
     }
 
+    /// Retry-safe send used by short-lived clients such as Share Extensions.
+    /// `sendId` names the logical send, while `threadId` freezes the selected
+    /// task so a retry can never drift to a newly active conversation.
+    public func send(
+        text: String,
+        to destination: MessageDestination,
+        sendId: String
+    ) async throws {
+        let route: String
+        let threadId: String
+        switch destination {
+        case let .bot(id, selectedThreadId):
+            guard Self.validRouteID(id) else { throw APIError.badURL }
+            route = "/api/bots/\(id)/messages"
+            threadId = selectedThreadId
+        case let .room(id, selectedThreadId):
+            guard Self.validRouteID(id) else { throw APIError.badURL }
+            route = "/api/groups/\(id)/messages"
+            threadId = selectedThreadId
+        }
+        guard Self.validRouteID(threadId), Self.validSendID(sendId) else { throw APIError.badURL }
+        try await send(try makeRequest(
+            "POST",
+            route,
+            body: ["text": text, "threadId": threadId, "sendId": sendId]
+        ))
+    }
+
+    private static func validRouteID(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.allSatisfy { byte in
+            (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
+                || byte == 45 || byte == 95
+        }
+    }
+
+    private static func validSendID(_ value: String) -> Bool {
+        (16...80).contains(value.utf8.count) && validRouteID(value)
+    }
+
     /// Answer an approval or a question.
     ///
     /// Addressed by thread rather than by bot on purpose: a request raised
     /// inside a room belongs to whichever member is speaking, and the
     /// harness already knows which that is.
-    public func respond(threadId: String, requestId: String, behavior: String, message: String? = nil) async throws {
+    public func respond(
+        threadId: String,
+        requestId: String,
+        behavior: String,
+        message: String? = nil,
+        reviewedSha256: String? = nil
+    ) async throws {
         var body: [String: Any] = ["requestId": requestId, "behavior": behavior]
         if let message { body["message"] = message }
+        if let reviewedSha256 { body["reviewedSha256"] = reviewedSha256 }
         try await send(try makeRequest("POST", "/api/threads/\(threadId)/respond", body: body))
     }
 
@@ -940,6 +1430,25 @@ public struct CompanionClient: Sendable {
 
     public func interrupt(botId: String) async throws {
         try await send(try makeRequest("POST", "/api/bots/\(botId)/interrupt"))
+    }
+
+    public func provideCredential(
+        botId: String,
+        messageId: String,
+        envelope: PhoneSecretEnvelope
+    ) async throws {
+        var request = try makeRequest(
+            "POST",
+            "/api/bots/\(botId)/secret-cards/\(messageId)/provide",
+            encodedBody: envelope
+        )
+        // Saving is transactional: the desktop validates provider access,
+        // commits its OS-encrypted credential document, and updates the live
+        // server before replying. Those provider checks have bounded network
+        // deadlines of their own, so this one operation deliberately gets
+        // longer than the normal twenty-second chat API timeout.
+        request.timeoutInterval = 115
+        try await send(request)
     }
 
     /// Mint a fresh interactive viewer for an existing cloud computer. The

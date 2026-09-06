@@ -14,33 +14,10 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { MAUS_COLORS, type MausColor, type MausMotion, type MausState } from "@/lib/mascot";
-import {
-  CursorAvatar,
-  DEFAULT_SILHOUETTE,
-  type CursorAvatarHandle,
-  type CursorSilhouette,
-} from "./CursorAvatar";
+import { CursorAvatar, type CursorAvatarHandle } from "./CursorAvatar";
 import { botAvatarProfile, type BotAvatarCrop } from "../../shared/bot-avatar";
+import { MASCOT_BODIES, botMascotBody, type MascotBodyId } from "../../shared/mascot-bodies";
 
-/**
- * The pack's baked-in silhouette was exported with the body fill hardcoded
- * to black instead of the {{GRADIENT}} placeholder the component
- * substitutes, which painted every bot the same. Restore the slot so the
- * per-bot gradient actually lands on the body.
- */
-const GRADIENT_SILHOUETTE: CursorSilhouette = {
-  ...DEFAULT_SILHOUETTE,
-  body: DEFAULT_SILHOUETTE.body.replace(/fill="#000000"/g, 'fill="{{GRADIENT}}"'),
-};
-
-/**
- * Legacy face-placement knobs from the Maus body era. The cursor mascot
- * places its own face; these remain only so the preview harness's sliders
- * keep compiling — the matching props are accepted and ignored.
- */
-export const FACE_X = 80;
-export const FACE_Y = 102;
-export const FACE_SCALE = 0.47;
 export const EYE_SCALE = 1.12;
 export const MOUTH_WEIGHT = 11;
 
@@ -131,11 +108,8 @@ export type MausAvatarProps = {
   trackPointer?: boolean;
   /** Run the animation. Off renders the state's resting face. */
   animated?: boolean;
-  /** Legacy Maus face-placement knobs — accepted, ignored. */
-  eyeSpacing?: number;
-  faceX?: number;
-  faceY?: number;
-  faceScale?: number;
+  /** Which body the bot wears. Unknown values fall back to the cursor. */
+  bodyId?: MascotBodyId;
 };
 
 function MausAvatarComponent(
@@ -157,9 +131,11 @@ function MausAvatarComponent(
     lookAround,
     trackPointer = true,
     animated = true,
+    bodyId,
   }: MausAvatarProps,
   ref: React.Ref<MausAvatarHandle>,
 ) {
+  const silhouette = MASCOT_BODIES[botMascotBody(bodyId)];
   const inner = useRef<CursorAvatarHandle>(null);
   useImperativeHandle(ref, () => ({
     blink: () => inner.current?.blink(),
@@ -205,7 +181,7 @@ function MausAvatarComponent(
         state={motionState ?? state}
         expression={expression}
         size={size}
-        silhouette={GRADIENT_SILHOUETTE}
+        silhouette={silhouette}
         gradient={gradientFor(color)}
         title={label ?? null}
         lookAround={lookAround ?? (forward ? 0 : 1)}
@@ -229,8 +205,35 @@ export type BotAvatarProps = Omit<MausAvatarProps, "color"> & {
     color: MausColor;
     avatarUrl?: string | null;
     avatarCrop?: BotAvatarCrop;
+    mascotBody?: MascotBodyId | null;
   };
 };
+
+export type BotAvatarOutcome = "flatImage" | "gradientMascot";
+
+/**
+ * Pick which of the two ways to render a bot's avatar, given the parsed
+ * profile plus whether the image has already failed to load. Kept as a pure
+ * function — independent of React state and effects — so both arms can be
+ * unit-tested directly: `imageFailed` is set by the `<img>`'s own `onError`,
+ * which `renderToStaticMarkup` never fires, so the failure fallback is
+ * unreachable from a synchronous render test.
+ *
+ * The iOS half of this decision is `resolveBotAvatarOutcome` in
+ * `ios/Sources/CompanionCore/BotAvatarRendering.swift`, which mirrors this
+ * union name for name so the two renderers can be read side by side.
+ */
+export function resolveBotAvatarOutcome(params: {
+  avatarCrop: BotAvatarCrop;
+  hasUrl: boolean;
+  imageFailed: boolean;
+}): BotAvatarOutcome {
+  const { avatarCrop, hasUrl, imageFailed } = params;
+  if (!hasUrl) return "gradientMascot";
+  if (avatarCrop === "mascot") return "gradientMascot";
+  if (imageFailed) return "gradientMascot";
+  return "flatImage";
+}
 
 /**
  * The one renderer for a bot's chosen profile image. Malformed persisted
@@ -243,9 +246,16 @@ export function BotAvatar({ bot, size = 44, label, ...mascotProps }: BotAvatarPr
 
   useEffect(() => setImageFailed(false), [profile.avatarUrl]);
 
-  if (profile.avatarCrop === "mascot" || !profile.avatarUrl || imageFailed) {
+  const outcome = resolveBotAvatarOutcome({
+    avatarCrop: profile.avatarCrop,
+    hasUrl: Boolean(profile.avatarUrl),
+    imageFailed,
+  });
+
+  if (outcome !== "flatImage") {
     return (
       <MausAvatar
+        bodyId={bot.mascotBody ?? undefined}
         {...mascotProps}
         color={bot.color}
         size={size}

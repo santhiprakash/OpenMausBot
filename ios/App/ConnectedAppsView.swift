@@ -65,7 +65,7 @@ struct ConnectedAppsView: View {
                     ContentUnavailableView(
                         "Connected apps need setup",
                         systemImage: "link.badge.plus",
-                        description: Text("Configure Composio on your computer first. Provider credentials are never returned to this phone.")
+                        description: Text("Configure Composio on your computer first. Provider credentials are never returned to this device.")
                     )
                 }
             }
@@ -129,7 +129,7 @@ struct ConnectedAppsView: View {
                 }
                 .disabled(catalog?.configured != true)
             } else if accounts.isEmpty {
-                let statusLabel = isPending ? "Connecting…" : "Connected"
+                let statusLabel: LocalizedStringKey = isPending ? "Connecting…" : "Connected"
                 let statusSymbol = isPending ? "clock" : "checkmark.circle.fill"
                 Label(statusLabel, systemImage: statusSymbol)
                     .foregroundStyle(isPending ? Color.secondary : Color.green)
@@ -140,7 +140,7 @@ struct ConnectedAppsView: View {
                 ForEach(accounts) { account in
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(account.nonemptyAlias ?? "Primary account")
+                            account.nonemptyAlias.map { Text(verbatim: $0) } ?? Text("Primary account")
                             Text(account.status.replacingOccurrences(of: "_", with: " ").capitalized)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)

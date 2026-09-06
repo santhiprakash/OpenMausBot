@@ -5,24 +5,32 @@
 // stays out of these — the integration happens in comms.test.ts (the full
 // e2e through the agents proxy + fake ACP CLI).
 import { rmSync } from "node:fs";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CommsBus } from "./comms-visibility.ts";
 import { DATA_DIR } from "./config.ts";
 import type { ModelSelection } from "./contracts.ts";
 import {
+  buildDelegationFailurePrompt,
+  buildDelegationRevivalPrompt,
+  DELEGATION_WAKE_MAX_PER_WINDOW,
+  DELEGATION_WAKE_WINDOW_MS,
+  DelegationWakeBudget,
   drainDelegations,
   findDelegationReceipt,
+  formatDelegationElapsed,
   MAX_BUSY_ATTEMPTS,
   pendingDelegationInfo,
   pendingDelegationSnapshot,
   queueDelegation,
   recordDelegationReceipt,
+  releaseDelegationsWaitingOn,
+  summarizeDelegatedActivity,
   threadsWaitingOn,
   _pendingCount,
 } from "./delegations.ts";
 import { peerAllowKey, resolvePeerComms } from "./peer-approval.ts";
-import { Store, type BotRecord } from "./store.ts";
+import { Store, type BotRecord, type GroupRecord } from "./store.ts";
 
 const selection = (): ModelSelection => ({ instanceId: "claude", model: "fake-model" });
 
@@ -124,6 +132,8 @@ describe("queueDelegation", () => {
       .messagesFor(from.threadId)
       .find((m) => m.kind === "activity" && m.tool?.name?.startsWith("Delegated to @"));
     expect(chip?.tool?.name).toBe("Delegated to @Helper: followup");
+    // queueing is the whole act — an open chip would spin for good
+    expect(chip?.tool?.ok).toBe(true);
 
     // The chip is also broadcast over SSE so chat clients see it without
     // polling /api/bots
@@ -146,7 +156,7 @@ describe("queueDelegation", () => {
     }, 1);
     const ownSnapshot = pendingDelegationSnapshot().filter((item) => item.sourceThreadId === from.threadId);
     expect(ownSnapshot).toEqual([
-      { sourceThreadId: from.threadId, toBotId: target.id, reason: "followup" },
+      { sourceThreadId: from.threadId, sourceBotId: from.id, toBotId: target.id, reason: "followup" },
     ]);
     expect(JSON.stringify(ownSnapshot)).not.toContain("private customer task details");
   });
@@ -327,6 +337,88 @@ describe("drainDelegations", () => {
     expect(runTargetCalls).toEqual([]);
   });
 
+  it("drops a queued handoff when section assignment separates the bots before dispatch", async () => {
+    const queued = queueDelegation(
+      commsBus,
+      from,
+      { toBotId: target.id, message: "do this", depth: 0 },
+      1,
+    );
+    expect(store.setBotsSection([target.id], "Elsewhere").ok).toBe(true);
+
+    drainDelegations(commsBus, approvalBus, from.threadId, (toBotId, message, commsDepth) => {
+      runTargetCalls.push({ toBotId, message, commsDepth });
+    });
+
+    await waitFor(() => findDelegationReceipt(queued.id!) && _pendingCount(from.threadId) === 0);
+    expect(findDelegationReceipt(queued.id!)).toMatchObject({
+      status: "dropped",
+      result: expect.stringContaining("different sections"),
+    });
+    expect(runTargetCalls).toEqual([]);
+    expect(
+      store.messagesFor(from.threadId).some((message) =>
+        message.tool?.name.includes("bots now belong to different sections")),
+    ).toBe(true);
+  });
+
+  it("drops a queued handoff when the sender's allow-list stops covering the target", async () => {
+    // The allow-list is checked again at the dispatch edge for the same
+    // reason section membership is: a handoff can sit in the queue across a
+    // busy target or an approval card, and the grant it was queued under may
+    // have been narrowed since.
+    const queued = queueDelegation(
+      commsBus,
+      from,
+      { toBotId: target.id, message: "do this", depth: 0 },
+      1,
+    );
+    store.patchBot(from.id, { peers: [] });
+
+    drainDelegations(commsBus, approvalBus, from.threadId, (toBotId, message, commsDepth) => {
+      runTargetCalls.push({ toBotId, message, commsDepth });
+    });
+
+    await waitFor(() => findDelegationReceipt(queued.id!) && _pendingCount(from.threadId) === 0);
+    expect(findDelegationReceipt(queued.id!)).toMatchObject({
+      status: "dropped",
+      result: expect.stringContaining("no longer allowed to contact"),
+    });
+    expect(runTargetCalls).toEqual([]);
+    expect(
+      store.messagesFor(from.threadId).some((message) =>
+        message.tool?.name.includes("is no longer an allowed peer")),
+    ).toBe(true);
+  });
+
+  it("still dispatches a queued handoff to a target the allow-list covers", async () => {
+    // The dropping direction alone is not coverage: a recheck that treated
+    // "sender has a list" as "sender is cut off" would cancel every handoff
+    // from an allow-listed bot and pass the test above. Pin the guard NOT
+    // firing too.
+    const queued = queueDelegation(
+      commsBus,
+      from,
+      { toBotId: target.id, message: "do this", depth: 0 },
+      1,
+    );
+    store.patchBot(from.id, { peers: [target.id] });
+
+    drainDelegations(commsBus, approvalBus, from.threadId, (toBotId, message, commsDepth) => {
+      runTargetCalls.push({ toBotId, message, commsDepth });
+    });
+
+    await waitFor(() => runTargetCalls.length === 1);
+    expect(runTargetCalls).toEqual([
+      { toBotId: target.id, message: expect.stringContaining("do this"), commsDepth: 1 },
+    ]);
+    expect(findDelegationReceipt(queued.id!)?.status).not.toBe("dropped");
+    expect(
+      store.messagesFor(from.threadId).some((message) =>
+        message.tool?.name.includes("no longer an allowed peer")),
+    ).toBe(false);
+  });
+
   it("keeps the handoff queued with a 'waiting' chip when the target is currently busy", async () => {
     store.patchBot(target.id, { busy: true });
     queueDelegation(commsBus, from, { toBotId: target.id, message: "do this", depth: 0 }, 1);
@@ -365,6 +457,46 @@ describe("drainDelegations", () => {
     await waitFor(() => runTargetCalls.length === 1);
     expect(runTargetCalls[0]!.toBotId).toBe(target.id);
     expect(runTargetCalls[0]!.commsDepth).toBe(1);
+  });
+
+  it("rechecks sections after a pending human approval before dispatch", async () => {
+    store.patchBot(from.id, { approvePeerComms: true });
+    const queued = queueDelegation(
+      commsBus,
+      from,
+      { toBotId: target.id, message: "do this", depth: 0 },
+      1,
+    );
+    drainDelegations(commsBus, approvalBus, from.threadId, (toBotId, message, commsDepth) => {
+      runTargetCalls.push({ toBotId, message, commsDepth });
+    });
+
+    const card = await waitFor(() =>
+      store.messagesFor(from.threadId).find((message) => message.card?.requestId),
+    );
+    expect(store.setBotsSection([target.id], "Elsewhere").ok).toBe(true);
+    resolvePeerComms(approvalBus, card.card!.requestId!, "allow");
+
+    await waitFor(() => findDelegationReceipt(queued.id!) && _pendingCount(from.threadId) === 0);
+    expect(findDelegationReceipt(queued.id!)).toMatchObject({ status: "dropped" });
+    expect(runTargetCalls).toEqual([]);
+  });
+
+  it("does not ask twice when this exact fallback was already approved as ask_bot", async () => {
+    store.patchBot(from.id, { approvePeerComms: true });
+    queueDelegation(commsBus, from, {
+      toBotId: target.id,
+      message: "do this",
+      depth: 0,
+      approvalAlreadyGranted: true,
+    }, 1);
+    drainDelegations(commsBus, approvalBus, from.threadId, (toBotId, message, commsDepth) => {
+      runTargetCalls.push({ toBotId, message, commsDepth });
+    });
+
+    await waitFor(() => runTargetCalls.length === 1);
+    expect(runTargetCalls[0]).toMatchObject({ toBotId: target.id, commsDepth: 1 });
+    expect(store.messagesFor(from.threadId).some((message) => message.card?.tool === "delegate_bot")).toBe(false);
   });
 
   it("emits a denial chip and skips runTarget when the user denies", async () => {
@@ -446,11 +578,20 @@ describe("delegations survive a restart", () => {
   afterEach(() => _resetPending());
 
   it("writes the queue to disk on queue, and clears it on drain and discard", async () => {
-    expect(queueDelegation(buses.commsBus, from, { toBotId: target.id, message: "do this", depth: 0 }, 1)).toMatchObject({ result: "ok" });
+    expect(queueDelegation(buses.commsBus, from, {
+      toBotId: target.id,
+      message: "do this",
+      depth: 0,
+      approvalAlreadyGranted: true,
+    }, 1)).toMatchObject({ result: "ok" });
     expect(existsSync(file())).toBe(true);
     const onDisk = JSON.parse(readFileSync(file(), "utf8")) as Record<string, unknown[]>;
     expect(onDisk[from.threadId]).toHaveLength(1);
-    expect(onDisk[from.threadId][0]).toMatchObject({ toBotId: target.id, message: "do this" });
+    expect(onDisk[from.threadId][0]).toMatchObject({
+      toBotId: target.id,
+      message: "do this",
+      approvalAlreadyGranted: true,
+    });
 
     discardDelegations(buses.commsBus, from.threadId);
     expect(JSON.parse(readFileSync(file(), "utf8"))[from.threadId]).toBeUndefined();
@@ -591,6 +732,9 @@ describe("busy retries and receipts", () => {
     for (let round = 1; round < MAX_BUSY_ATTEMPTS; round++) {
       drainDelegations(commsBus, approvalBus, from.threadId, runTarget);
       await waitFor(() => chipCount(`retry ${round}/`) === 1);
+      // One retry is charged per distinct busy period. Releasing the wait
+      // models that turn settling before another turn claims the target.
+      expect(releaseDelegationsWaitingOn(target.id)).toEqual([from.threadId]);
     }
     drainDelegations(commsBus, approvalBus, from.threadId, runTarget);
     await waitFor(() => _pendingCount(from.threadId) === 0);
@@ -600,6 +744,30 @@ describe("busy retries and receipts", () => {
       toBotName: "Helper",
       sourceThreadId: from.threadId,
     });
+  });
+
+  it("does not burn busy retries when an unrelated drain is requested", async () => {
+    store.patchBot(target.id, { busy: true });
+    const queued = queueDelegation(commsBus, from, { toBotId: target.id, message: "later", depth: 0 }, 1);
+    const taskId = queued.id!;
+    const runTarget = vi.fn();
+
+    drainDelegations(commsBus, approvalBus, from.threadId, runTarget);
+    await waitFor(() => chipCount("retry 1/") === 1);
+
+    // A source-thread redrain can happen while an approval for another
+    // item settles. It must not count the same continuously busy turn again.
+    for (let index = 0; index < MAX_BUSY_ATTEMPTS + 1; index++) {
+      drainDelegations(commsBus, approvalBus, from.threadId, runTarget);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(pendingDelegationInfo(taskId)?.attempts).toBe(1);
+    expect(chipCount("canceled — still busy after")).toBe(0);
+
+    store.patchBot(target.id, { busy: false });
+    expect(releaseDelegationsWaitingOn(target.id)).toEqual([from.threadId]);
+    drainDelegations(commsBus, approvalBus, from.threadId, runTarget);
+    await waitFor(() => runTarget.mock.calls.length === 1);
   });
 
   it("persists receipts across a restart and prunes the drawer by count", () => {
@@ -634,5 +802,214 @@ describe("busy retries and receipts", () => {
     discardDelegations(commsBus, from.threadId);
     expect(_pendingCount(from.threadId)).toBe(0);
     expect(findDelegationReceipt(queued.id!)).toMatchObject({ status: "dropped" });
+  });
+});
+
+describe("originating group routing", () => {
+  let store: Store;
+  let from: BotRecord;
+  let target: BotRecord;
+  let group: GroupRecord;
+  let commsBus: CommsBus;
+  let approvalBus: { store: Store; broadcast: (payload: unknown) => void };
+
+  beforeEach(() => {
+    rmSync(DATA_DIR, { recursive: true, force: true });
+    _resetPending();
+    store = new Store(selection);
+    from = store.createBot();
+    target = store.createBot();
+    store.patchBot(target.id, { name: "Helper" });
+    group = store.createGroup("Planning", [from.id, target.id], false, "Agents");
+    const buses = setupBuses(store);
+    commsBus = buses.commsBus;
+    approvalBus = buses.approvalBus;
+  });
+  afterEach(() => _resetPending());
+
+  it("routes a group-thread delegation through the shared channel, not a pair DM", async () => {
+    queueDelegation(commsBus, from, { toBotId: target.id, message: "plan the sprint", depth: 0 }, 1, group.threadId);
+    const runTargetCalls: { channel: GroupRecord | undefined }[] = [];
+    drainDelegations(commsBus, approvalBus, group.threadId, (...args: unknown[]) => {
+      runTargetCalls.push({ channel: args[4] as GroupRecord | undefined });
+    });
+
+    await waitFor(() => runTargetCalls.length === 1);
+    expect(runTargetCalls[0]!.channel?.id).toBe(group.id);
+    expect(runTargetCalls[0]!.channel?.dm).toBeFalsy();
+    expect(store.dmGroup(from.id, target.id)).toBeUndefined();
+    expect(store.messagesFor(group.threadId).some((m) => m.kind === "text" && m.text?.includes("plan the sprint"))).toBe(true);
+    expect(store.messagesFor(group.threadId).some((m) => m.kind === "activity" && m.tool?.name === "Messaged @Helper")).toBe(true);
+  });
+
+  it("still uses a pair DM when the source is the bot's 1:1 thread", async () => {
+    queueDelegation(commsBus, from, { toBotId: target.id, message: "do this", depth: 0 }, 1, from.threadId);
+    const runTargetCalls: { channel: GroupRecord | undefined }[] = [];
+    drainDelegations(commsBus, approvalBus, from.threadId, (...args: unknown[]) => {
+      runTargetCalls.push({ channel: args[4] as GroupRecord | undefined });
+    });
+
+    await waitFor(() => runTargetCalls.length === 1);
+    expect(runTargetCalls[0]!.channel?.dm).toBe(true);
+    expect(runTargetCalls[0]!.channel?.memberIds).toEqual(expect.arrayContaining([from.id, target.id]));
+  });
+
+  it("does not create a pair DM when a valid shared channel exists", async () => {
+    queueDelegation(commsBus, from, { toBotId: target.id, message: "in the room", depth: 0 }, 1, group.threadId);
+    const before = store.groups.filter((g) => g.dm).length;
+    drainDelegations(commsBus, approvalBus, group.threadId, () => {});
+    await waitFor(() => _pendingCount(group.threadId) === 0);
+    const after = store.groups.filter((g) => g.dm).length;
+    expect(after).toBe(before);
+  });
+
+  it("survives persistence: a loaded delegation keeps its originating group", async () => {
+    queueDelegation(commsBus, from, { toBotId: target.id, message: "left over", depth: 0 }, 1, group.threadId);
+    _resetPending();
+    _loadPending();
+    expect(pendingThreads()).toEqual([group.threadId]);
+
+    const runTargetCalls: { channel: GroupRecord | undefined }[] = [];
+    drainDelegations(commsBus, approvalBus, group.threadId, (...args: unknown[]) => {
+      runTargetCalls.push({ channel: args[4] as GroupRecord | undefined });
+    });
+    await waitFor(() => runTargetCalls.length === 1 && _pendingCount(group.threadId) === 0);
+    expect(runTargetCalls[0]!.channel?.id).toBe(group.id);
+  });
+
+  it("drains each shared-group item under the bot that queued it", async () => {
+    const other = store.createBot();
+    store.patchBot(other.id, { name: "Other" });
+    store.patchGroup(group.id, { memberIds: [from.id, target.id, other.id] });
+    queueDelegation(commsBus, from, { toBotId: target.id, message: "from A", depth: 0 }, 1, group.threadId);
+    queueDelegation(commsBus, other, { toBotId: target.id, message: "from B", depth: 0 }, 1, group.threadId);
+
+    const seen: { message: string }[] = [];
+    drainDelegations(commsBus, approvalBus, group.threadId, (_to, message) => {
+      seen.push({ message });
+    });
+    await waitFor(() => seen.length === 2);
+
+    expect(seen[0]!.message).toContain(`[Delegated by @${from.name},`);
+    expect(seen[1]!.message).toContain("[Delegated by @Other,");
+    expect(store.dmGroup(from.id, target.id)).toBeUndefined();
+  });
+
+  it("tags the queue activity with the source bot in a shared group", () => {
+    queueDelegation(commsBus, from, { toBotId: target.id, message: "plan", depth: 0 }, 1, group.threadId);
+    const chip = store
+      .messagesFor(group.threadId)
+      .find((m) => m.kind === "activity" && m.tool?.name?.startsWith("Delegated to @"));
+    expect(chip?.from?.botId).toBe(from.id);
+  });
+
+  it("preserves each source bot's identity for two bots delegating to the same target", async () => {
+    const other = store.createBot();
+    store.patchBot(other.id, { name: "Other" });
+    store.patchGroup(group.id, { memberIds: [from.id, target.id, other.id] });
+
+    queueDelegation(commsBus, from, { toBotId: target.id, message: "from A", depth: 0 }, 1, group.threadId);
+    queueDelegation(commsBus, other, { toBotId: target.id, message: "from B", depth: 0 }, 1, group.threadId);
+
+    const snapshot = pendingDelegationSnapshot().filter((item) => item.sourceThreadId === group.threadId);
+    expect(snapshot.map((item) => item.sourceBotId).sort()).toEqual([from.id, other.id].sort());
+
+    const calls: Array<{ sourceBotId: string; sourceThreadId: string; channel?: GroupRecord }> = [];
+    drainDelegations(commsBus, approvalBus, group.threadId, (...args: unknown[]) => {
+      calls.push({
+        sourceBotId: args[6] as string,
+        sourceThreadId: args[3] as string,
+        channel: args[4] as GroupRecord | undefined,
+      });
+    });
+    await waitFor(() => calls.length === 2);
+
+    const sourceBotIds = calls.map((c) => c.sourceBotId).sort();
+    expect(sourceBotIds).toEqual([from.id, other.id].sort());
+    expect(calls.every((c) => c.sourceThreadId === group.threadId)).toBe(true);
+    expect(calls.every((c) => c.channel?.id === group.id && !c.channel?.dm)).toBe(true);
+    expect(store.dmGroup(from.id, target.id)).toBeUndefined();
+  });
+});
+
+describe("peer wake helpers", () => {
+  it("buildDelegationRevivalPrompt names the peer and instructs the source to answer", () => {
+    const prompt = buildDelegationRevivalPrompt("Helper");
+    expect(prompt).toContain("@Helper");
+    expect(prompt).toContain("answer the user with the outcome");
+    expect(prompt).toContain("Do not re-delegate the same task");
+  });
+
+  it("buildDelegationFailurePrompt carries the reason and forbids an unchanged retry", () => {
+    const prompt = buildDelegationFailurePrompt("Helper", "delegated turn stalled");
+    expect(prompt).toContain("@Helper");
+    expect(prompt).toContain("delegated turn stalled");
+    expect(prompt).toContain("tell the user what failed");
+    expect(prompt).toContain("Do not re-delegate the exact same task unchanged");
+  });
+
+  it("DelegationWakeBudget caps bursts per thread and expires with the window", () => {
+    let now = 1_000_000;
+    const budget = new DelegationWakeBudget(() => now);
+
+    for (let i = 0; i < DELEGATION_WAKE_MAX_PER_WINDOW; i++) {
+      expect(budget.tryAcquire("t1")).toBe(true);
+    }
+    // cap reached — no further wakes within the same window
+    expect(budget.tryAcquire("t1")).toBe(false);
+
+    // a different thread has its own budget
+    expect(budget.tryAcquire("t2")).toBe(true);
+
+    // the window rolls over and the cap resets
+    now += DELEGATION_WAKE_WINDOW_MS + 1;
+    expect(budget.tryAcquire("t1")).toBe(true);
+  });
+
+  it("DelegationWakeBudget.reset clears the debt for a thread", () => {
+    let now = 1_000_000;
+    const budget = new DelegationWakeBudget(() => now);
+    for (let i = 0; i < DELEGATION_WAKE_MAX_PER_WINDOW; i++) budget.tryAcquire("t1");
+    expect(budget.tryAcquire("t1")).toBe(false);
+    budget.reset("t1");
+    expect(budget.tryAcquire("t1")).toBe(true);
+  });
+});
+
+describe("delegated turn status helpers", () => {
+  it("formats elapsed time compactly", () => {
+    expect(formatDelegationElapsed(5_000)).toBe("5s");
+    expect(formatDelegationElapsed(65_000)).toBe("65s");
+    expect(formatDelegationElapsed(95_000)).toBe("1m 35s");
+    expect(formatDelegationElapsed(180_000)).toBe("3m");
+  });
+
+  it("summarizeDelegatedActivity keeps only post-dispatch activity, newest last, bounded", () => {
+    const messages = [
+      { at: 900, kind: "text", text: "before dispatch (the user's ask)" },
+      { at: 1_100, kind: "activity", tool: { name: "Delegated to @Helper: followup" } },
+      { at: 1_200, kind: "text", text: "peer inbound message" },
+      { at: 1_300, kind: "activity", tool: { name: "tool: Bash" } },
+      { at: 1_400, kind: "text", text: "  multi  space   reply " },
+      { at: 1_500, kind: "activity" },
+      { at: 1_600, kind: "unknown-kind" },
+    ];
+    const lines = summarizeDelegatedActivity(messages, 1_000, 5);
+    expect(lines).toEqual([
+      "tool: Delegated to @Helper: followup",
+      "text: peer inbound message",
+      "tool: tool: Bash",
+      "text: multi space reply",
+    ]);
+  });
+
+  it("summarizeDelegatedActivity bounds the list to the newest lines", () => {
+    const messages = Array.from({ length: 9 }, (_, index) => ({
+      at: 1_000 + index,
+      kind: "activity",
+      tool: { name: `step-${index}` },
+    }));
+    const lines = summarizeDelegatedActivity(messages, 1_000, 3);
+    expect(lines).toEqual(["tool: step-6", "tool: step-7", "tool: step-8"]);
   });
 });

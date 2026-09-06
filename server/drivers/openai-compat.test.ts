@@ -78,17 +78,21 @@ describe("OpenAICompatDriver", () => {
 
     await inst.refreshModels?.();
 
+    // Every option carries `custom: true`: this engine advertises
+    // `access: "custom"`, and the picker renders only custom-flagged options
+    // for such engines — an unflagged one is invisible in its own picker.
     expect(inst.models).toEqual({
       default: "vendor/model-a",
       options: [
-        { id: "vendor/model-a", label: "Model A" },
-        { id: "vendor/model-b", label: "vendor/model-b" },
+        { id: "vendor/model-a", label: "Model A", custom: true },
+        { id: "vendor/model-b", label: "vendor/model-b", custom: true },
       ],
     });
     await inst.dispose();
   });
 
-  it("includes streamed token totals in turn.completed", async () => {
+  it("includes streamed token totals and bounds the cancellable stream", async () => {
+    const anySignal = vi.spyOn(AbortSignal, "any");
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string | URL | Request) => {
@@ -115,6 +119,7 @@ describe("OpenAICompatDriver", () => {
     const completed = await recorder.until((event) => event.type === "turn.completed");
 
     expect(completed).toMatchObject({ ok: true, usage: { input: 12, output: 3 } });
+    expect(anySignal).toHaveBeenCalledTimes(1);
     recorder.stop();
     await inst.dispose();
   });

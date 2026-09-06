@@ -72,7 +72,6 @@ enum MausFaceData {
     static let faceBox: CGFloat = 228.541
     static let faceCentre = CGPoint(x: 120, y: 122.5)
     static let mouthStroke: CGFloat = 7.5
-    static let anchor = (x: CGFloat(87.04), y: CGFloat(98.65), scale: CGFloat(0.84))
     static let gazeTravel = CGPoint(x: 13.2, y: 8.4)
     static let expressionCount = 25
     static let pointsPerRing = 48

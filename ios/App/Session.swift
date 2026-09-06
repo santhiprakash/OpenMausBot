@@ -19,6 +19,26 @@ import UIKit
 /// the transitions are worth being able to read.
 private let log = Logger(subsystem: "com.openmausbot.companion", category: "stream")
 
+private final class CachedAttachmentDownload: NSObject {
+    let value: DownloadedFile
+
+    init(_ value: DownloadedFile) {
+        self.value = value
+    }
+}
+
+/// An immutable, ciphertext-only credential write prepared on the main
+/// actor before any asynchronous work begins. HPKE uses fresh randomness for
+/// every seal, so retries must reuse this exact value rather than encrypting
+/// the same credential again after an ambiguous network failure.
+struct PreparedPhoneCredential: Equatable, Sendable {
+    fileprivate let requestIdentity: String
+    fileprivate let connectionID: String
+    fileprivate let botID: String
+    fileprivate let messageID: String
+    fileprivate let envelope: PhoneSecretEnvelope
+}
+
 @MainActor
 final class Session: ObservableObject {
     enum Status: Equatable {
@@ -32,6 +52,7 @@ final class Session: ObservableObject {
 
     @Published private(set) var state = CompanionState()
     @Published private(set) var connection: Connection?
+    @Published private(set) var connections: [Connection] = []
     @Published private(set) var status: Status = .unpaired
     /// Transient, user-facing failures from an action they just took.
     @Published var actionError: String?
@@ -43,12 +64,23 @@ final class Session: ObservableObject {
     @Published private(set) var notificationAuthorizationResolved = false
     /// A short-lived desktop handoff waiting for PairingView to present it.
     @Published private(set) var pairingInvite: PairingInvite?
+    /// Pairing can be opened while another computer remains connected. The
+    /// working session is only replaced after the new credential commits.
+    @Published private(set) var pairingRequested = false
+    /// Views with sensitive input observe this value so an explicit runtime
+    /// disconnect clears the field even when the selected connection itself
+    /// has not changed.
+    @Published private(set) var credentialEntryResetGeneration = 0
 
     /// A notification response that should be pushed by the roster's
     /// NavigationStack after the exact detached task has been activated.
     @Published private(set) var notificationChat: Chat?
 
     private var client: CompanionClient?
+    /// Ciphertext-only operations survive navigation and transient
+    /// disconnects so a retry cannot accidentally reseal the same value with
+    /// a different HPKE operation id. Nothing here is persisted to disk.
+    private var preparedPhoneCredentials: [String: PreparedPhoneCredential] = [:]
     /// The device token, kept in memory so the client can be rebuilt when the
     /// dial moves to another stored host. The keychain remains the only place
     /// it is persisted.
@@ -84,6 +116,20 @@ final class Session: ObservableObject {
     /// for the same attachment path.
     private var avatarFetches: [String: (id: UUID, task: Task<Data?, Never>)] = [:]
     private var avatarCacheGeneration = 0
+    /// Full image bytes are already fetched to draw a thumbnail. Keep a small,
+    /// cost-bounded window so tapping that thumbnail opens immediately instead
+    /// of downloading the same image twice.
+    private let attachmentCache: NSCache<NSString, CachedAttachmentDownload> = {
+        let cache = NSCache<NSString, CachedAttachmentDownload>()
+        cache.countLimit = 12
+        cache.totalCostLimit = 32 * 1_024 * 1_024
+        return cache
+    }()
+    private var attachmentCacheGeneration = 0
+    /// An ambiguous network failure may happen after the server accepted a
+    /// message. Reusing this id for the exact same retained draft makes Retry
+    /// idempotent instead of sending the attachment twice.
+    private var attachmentSendIDs: [AttachmentDraftKey: String] = [:]
     /// A saved connection exists, but its token could not be read yet. Keeps
     /// "the keychain is locked" from being mistaken for "not paired".
     private var restorePending = false
@@ -92,21 +138,54 @@ final class Session: ObservableObject {
     /// paired client can be rebuilt after unlock.
     private var pendingNotification: NotificationTarget?
 
-    private static let connectionKey = "companion.connection"
+    /// The exact route the current client will use for a credential write.
+    var phoneCredentialTransportIsProtected: Bool {
+        client?.connection.activeEndpoint?.protectsCredentials == true
+    }
 
+    private struct AttachmentDraftKey: Hashable {
+        let destination: MessageDestination
+        let text: String
+        let attachmentIDs: [UUID]
+    }
+
+    private var registry = CompanionConnectionRegistry()
     // MARK: - Pairing
 
     init() {
+        Self.removeStaleFilePreviews()
         _ = NotificationCoordinator.shared
         NotificationCoordinator.shared.responseHandler = { [weak self] target in
             Task { @MainActor in await self?.openNotification(target) }
         }
 #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("-store-preview"),
+        let arguments = ProcessInfo.processInfo.arguments
+        if (arguments.contains("-store-preview") || arguments.contains("-computer-switcher-preview")),
            let url = Bundle.main.url(forResource: "StorePreview", withExtension: "json"),
            let data = try? Data(contentsOf: url),
            let fleet = try? JSONDecoder().decode(Fleet.self, from: data) {
-            connection = Connection(name: "Preview Mac", host: "preview.tailnet.ts.net", port: 8810)
+            let preview = Connection(
+                id: "preview-current",
+                name: "Milind’s MacBook Pro",
+                host: "preview.tailnet.ts.net",
+                port: 8810
+            )
+            connection = preview
+            if arguments.contains("-computer-switcher-preview") {
+                let other = Connection(
+                    id: "preview-other",
+                    name: "MacBook Air",
+                    host: "air.tailnet.ts.net",
+                    port: 8810
+                )
+                registry = CompanionConnectionRegistry(
+                    connections: [preview, other],
+                    activeConnectionID: preview.id
+                )
+                connections = registry.connections
+            } else {
+                connections = [preview]
+            }
             state.hydrate(fleet)
             status = .live
             return
@@ -116,7 +195,8 @@ final class Session: ObservableObject {
         Task { await refreshNotificationAuthorization() }
     }
 
-    /// Rebuild the last connection at launch.
+    /// Rebuild the selected connection at launch, migrating the previous
+    /// single-computer record the first time a multi-computer build runs.
     ///
     /// Three outcomes, and keeping them apart is the whole point. No saved
     /// connection: stay unpaired. A saved connection whose token reads back:
@@ -127,9 +207,26 @@ final class Session: ObservableObject {
     /// only the first should ever send someone back to the pairing screen.
     private func restore() {
         restorePending = false
-        guard let data = UserDefaults.standard.data(forKey: Self.connectionKey),
-              let saved = try? JSONDecoder().decode(Connection.self, from: data)
-        else { return }
+        registry = OpenMausSharedConnectionStore.loadRegistry()
+        connections = registry.connections
+        // The Share extension can target any saved computer, not only the
+        // one active at launch. Move every inactive pre-extension token into
+        // the shared Keychain group now; the active token is read below so
+        // its locked/error state can still drive the visible connection UI.
+        for saved in registry.connections where saved.id != registry.activeConnectionID {
+            _ = try? Keychain.token(for: saved.id)
+        }
+        restoreSelectedConnection()
+    }
+
+    /// Find the first selected pairing whose Keychain token still exists.
+    /// A missing token is a genuinely unusable saved record; a locked
+    /// Keychain is temporary and must leave the record untouched.
+    private func restoreSelectedConnection() {
+        guard let saved = registry.activeConnection else {
+            clearActiveConnection()
+            return
+        }
 
         let stored: String?
         do {
@@ -143,22 +240,20 @@ final class Session: ObservableObject {
             restorePending = true
             status = .offline(
                 (error as? KeychainError)?.isLocked == true
-                    ? "Unlock this phone to reach your computer."
+                    ? "Unlock this device to reach your computer."
                     : error.localizedDescription
             )
             return
         }
-        guard let stored else { return } // no token: genuinely not paired
+        guard let stored else {
+            registry.remove(id: saved.id)
+            persistRegistry()
+            connections = registry.connections
+            restoreSelectedConnection()
+            return
+        }
 
-        connection = saved
-        token = stored
-        // New connections honor the desktop's transport policy. Automatic
-        // walking is credential-safe: protected routes stay protected, while
-        // a legacy/local route is only tried when it was the exact saved route.
-        rotation = CandidateRotation(endpoints: saved.orderedEndpoints)
-        let first = rotation.currentEndpoint.map(saved.dialing) ?? saved
-        client = CompanionClient(connection: first, token: stored)
-        status = .connecting
+        configureActiveConnection(saved, token: stored)
     }
 
     /// Redeem a one-time pairing credential. On success the device token goes
@@ -177,6 +272,25 @@ final class Session: ObservableObject {
         if invited.allowedRouteKinds == nil {
             invited.establishRoutePolicyFromInvite()
         }
+        // A 12-character code pairs with a server directly (its own sessions,
+        // a client-scope bearer); anything else is the companion sidecar's.
+        if let code = PairingInvite.normalizedServerCode(credential) {
+            let paired = try await CompanionClient.pairWithServer(
+                connection: invited,
+                code: code,
+                label: deviceName,
+                attemptId: pairRequestId
+            )
+            var stored = invited
+            if !paired.environment.label.isEmpty { stored.name = paired.environment.label }
+            stored.serverEnvironmentId = paired.environment.environmentId
+            stored.companionDeviceId = nil
+            if let existing = registry.matchingConnection(for: stored) {
+                stored.id = existing.id
+            }
+            try commitPairing(stored, token: paired.token)
+            return
+        }
         let outcome = try await CompanionClient.pairFirstReachable(
             connection: invited,
             credential: credential,
@@ -187,6 +301,7 @@ final class Session: ObservableObject {
         // prefer the name the computer calls itself over the Bonjour label
         var stored = outcome.connection
         if !paired.serverName.isEmpty { stored.name = paired.serverName }
+        stored.companionDeviceId = paired.device.id
         // The computer knows every address it answers on, but redemption may
         // not widen the explicit route consent carried by the invite.
         stored.applyPairingAdvertisement(hosts: paired.hosts, endpoints: paired.endpoints)
@@ -199,8 +314,21 @@ final class Session: ObservableObject {
         if stored.endpoints?.isEmpty != false {
             stored.hosts = Array(stored.orderedHosts.prefix(8))
         }
+        if let existing = registry.matchingConnection(for: stored) {
+            stored.id = existing.id
+        }
+        try commitPairing(stored, token: paired.token, winner: winner)
+    }
 
-        try Keychain.save(paired.token, for: stored.id)
+    /// The device token goes to the keychain and the connection to defaults —
+    /// deliberately apart, so the thing that gets backed up is never the
+    /// credential. Shared by companion and server pairing; `winner` is the
+    /// route that answered, which a server pairing (one route) has no use for.
+    private func commitPairing(_ stored: Connection, token: String, winner: CompanionEndpoint? = nil) throws {
+        try Keychain.save(token, for: stored.id)
+        let firstPairing = registry.connections.isEmpty
+        var updatedRegistry = registry
+        updatedRegistry.upsert(stored)
         // Write the first-pair education marker before making the connection
         // restorable. If the process stops between these writes, an orphan
         // marker is harmless while unpaired; the reverse order could restore
@@ -208,30 +336,33 @@ final class Session: ObservableObject {
         // RootView may not have received iOS's notification status yet, and
         // the app may be relaunched before that asynchronous lookup finishes.
         CompanionPairingCommitSequence.persist {
-            UserDefaults.standard.set(
-                true,
-                forKey: CompanionOnboardingPreferences.pendingNotificationOnboardingKey
-            )
+            if firstPairing {
+                UserDefaults.standard.set(
+                    true,
+                    forKey: CompanionOnboardingPreferences.pendingNotificationOnboardingKey
+                )
+            }
         } saveConnection: {
-            UserDefaults.standard.set(
-                try? JSONEncoder().encode(stored),
-                forKey: Self.connectionKey
-            )
+            OpenMausSharedConnectionStore.saveRegistry(updatedRegistry)
         }
 
+        stopActiveRuntime()
         pairingInvite = CompanionPairingInvitePolicy.nextInvite(
             current: pairingInvite,
             after: .pairingSucceeded
         )
+        pairingRequested = false
+        registry = updatedRegistry
+        connections = registry.connections
         self.connection = stored
-        self.token = paired.token
+        self.token = token
         let liveRoutes = winner.map { route in
             [route] + stored.orderedEndpoints.filter { $0.url != route.url }
         } ?? stored.orderedEndpoints
         self.rotation = CandidateRotation(endpoints: liveRoutes)
         self.client = CompanionClient(
             connection: winner.map(stored.dialing) ?? stored,
-            token: paired.token
+            token: token
         )
         self.state = CompanionState()
         // A fresh pairing settles any restore that was still waiting on the
@@ -241,13 +372,6 @@ final class Session: ObservableObject {
     }
 
     func receivePairingURL(_ url: URL) {
-        guard CompanionPairingInvitePolicy.allowsIncomingInvite(
-            hasConnection: connection != nil,
-            pairingStateIsUnpaired: status == .unpaired
-        ) else {
-            actionError = "This phone is already paired. Unpair it in Settings before connecting it to another computer."
-            return
-        }
         guard let invite = PairingInvite.parse(url) else {
             actionError = "That pairing invitation is not valid. Start pairing again on your computer."
             return
@@ -256,6 +380,16 @@ final class Session: ObservableObject {
             current: pairingInvite,
             after: .received(invite)
         )
+        pairingRequested = true
+    }
+
+    func beginPairing() {
+        pairingRequested = true
+    }
+
+    func endPairing() {
+        pairingRequested = false
+        consumePairingInvite()
     }
 
     func consumePairingInvite() {
@@ -265,7 +399,81 @@ final class Session: ObservableObject {
         )
     }
 
+    func switchComputer(to id: String) {
+        guard let saved = registry.connection(id: id) else { return }
+        if connection?.id == id {
+            restartStream()
+            connect()
+            return
+        }
+
+        let stored: String?
+        do {
+            stored = try Keychain.token(for: id)
+        } catch {
+            actionError = (error as? KeychainError)?.isLocked == true
+                ? "Unlock this device, then try switching computers again."
+                : error.localizedDescription
+            return
+        }
+        guard let stored else {
+            actionError = "This saved connection is no longer available on this device. Remove it and pair again."
+            return
+        }
+
+        stopActiveRuntime()
+        registry.select(id: id)
+        persistRegistry()
+        connections = registry.connections
+        configureActiveConnection(saved, token: stored)
+        connect()
+    }
+
+    func forgetConnection(id: String) {
+        guard let forgotten = registry.connection(id: id) else { return }
+        let wasActive = registry.activeConnectionID == id
+        // A server session is ended on the server too, best effort: the
+        // bearer is discarded locally either way.
+        if forgotten.pairedWithServer, let token = try? Keychain.token(for: id) {
+            let client = CompanionClient(connection: forgotten, token: token)
+            Task.detached { try? await client.logout() }
+        }
+        if wasActive { stopActiveRuntime() }
+        preparedPhoneCredentials = preparedPhoneCredentials.filter { $0.value.connectionID != id }
+        Keychain.remove(id)
+        registry.remove(id: id)
+        persistRegistry()
+        connections = registry.connections
+        guard wasActive else { return }
+
+        connection = nil
+        client = nil
+        token = nil
+        rotation = CandidateRotation(hosts: [])
+        state = CompanionState()
+        resetAvatarCache()
+        NotificationCoordinator.shared.setBadge(0)
+        restoreSelectedConnection()
+        if connection != nil { connect() }
+        if connections.isEmpty {
+            UserDefaults.standard.removeObject(
+                forKey: CompanionOnboardingPreferences.pendingNotificationOnboardingKey
+            )
+        }
+    }
+
+    /// Compatibility for the existing revoked-pairing and detail actions:
+    /// sign out now means remove only the selected computer.
     func signOut() {
+        guard let id = connection?.id ?? registry.activeConnectionID else {
+            clearActiveConnection()
+            return
+        }
+        forgetConnection(id: id)
+    }
+
+    private func clearActiveConnection() {
+        resetCredentialEntry()
         streamTask?.cancel()
         streamTask = nil
         endpointRefreshTask?.cancel()
@@ -276,19 +484,60 @@ final class Session: ObservableObject {
             current: pairingInvite,
             after: .signedOut
         )
-        if let id = connection?.id { Keychain.remove(id) }
-        UserDefaults.standard.removeObject(forKey: Self.connectionKey)
-        UserDefaults.standard.removeObject(
-            forKey: CompanionOnboardingPreferences.pendingNotificationOnboardingKey
-        )
+        pairingRequested = false
         connection = nil
         client = nil
         token = nil
         rotation = CandidateRotation(hosts: [])
         state = CompanionState()
         resetAvatarCache()
+        resetAttachmentCache()
+        attachmentSendIDs.removeAll()
         NotificationCoordinator.shared.setBadge(0)
         status = .unpaired
+    }
+
+    private func configureActiveConnection(_ saved: Connection, token stored: String) {
+        connection = saved
+        token = stored
+        // New connections honor the desktop's transport policy. Automatic
+        // walking is credential-safe: protected routes stay protected, while
+        // a legacy/local route is only tried when it was the exact saved route.
+        rotation = CandidateRotation(endpoints: saved.orderedEndpoints)
+        let first = rotation.currentEndpoint.map(saved.dialing) ?? saved
+        client = CompanionClient(connection: first, token: stored)
+        status = .connecting
+    }
+
+    private func stopActiveRuntime() {
+        resetCredentialEntry()
+        streamGeneration += 1
+        streamTask?.cancel()
+        streamTask = nil
+        endpointRefreshTask?.cancel()
+        endpointRefreshTask = nil
+        restorePending = false
+        endLinger()
+        pendingNotification = nil
+        screenWatchers = 0
+        client = nil
+        token = nil
+        state = CompanionState()
+        resetAvatarCache()
+        resetAttachmentCache()
+        attachmentSendIDs.removeAll()
+        NotificationCoordinator.shared.setBadge(0)
+    }
+
+    private func persistRegistry() {
+        OpenMausSharedConnectionStore.saveRegistry(registry)
+    }
+
+    private func persistActiveConnection(_ updated: Connection) {
+        registry.upsert(updated, makeActive: false)
+        connection = updated
+        connections = registry.connections
+        persistRegistry()
     }
 
     // MARK: - Lifecycle
@@ -368,11 +617,16 @@ final class Session: ObservableObject {
     /// anyway; dropping it deliberately means the cursor is written down at
     /// a known point instead of wherever the socket happened to die.
     func disconnect() {
+        resetCredentialEntry()
         streamTask?.cancel()
         streamTask = nil
         endpointRefreshTask?.cancel()
         endpointRefreshTask = nil
         endLinger()
+    }
+
+    private func resetCredentialEntry() {
+        credentialEntryResetGeneration &+= 1
     }
 
     private var lingerTask: UIBackgroundTaskIdentifier = .invalid
@@ -530,8 +784,7 @@ final class Session: ObservableObject {
         guard let winner = rotation.currentEndpoint, var updated = connection,
               updated.activeEndpoint?.url != winner.url else { return }
         updated.promote(winner)
-        connection = updated
-        UserDefaults.standard.set(try? JSONEncoder().encode(updated), forKey: Self.connectionKey)
+        persistActiveConnection(updated)
     }
 
     /// Learn routes enabled after this phone originally paired. The endpoint
@@ -554,11 +807,7 @@ final class Session: ObservableObject {
                 else { return }
 
                 updated.reconcile(metadata)
-                self.connection = updated
-                UserDefaults.standard.set(
-                    try? JSONEncoder().encode(updated),
-                    forKey: Self.connectionKey
-                )
+                self.persistActiveConnection(updated)
 
                 // Keep the currently live route first until this stream ends.
                 // CandidateRotation applies the same no-downgrade policy used
@@ -588,8 +837,7 @@ final class Session: ObservableObject {
             priority: 0
         ) else { return false }
         updated.resetRoutePolicy(selecting: endpoint)
-        connection = updated
-        UserDefaults.standard.set(try? JSONEncoder().encode(updated), forKey: Self.connectionKey)
+        persistActiveConnection(updated)
         rotation = CandidateRotation(endpoints: updated.orderedEndpoints)
         if let token {
             client = CompanionClient(connection: updated.dialing(endpoint), token: token)
@@ -617,6 +865,297 @@ final class Session: ObservableObject {
         }
     }
 
+    /// Send a composer draft with app-owned attachments. The destination
+    /// includes the exact active thread at tap time, so neither a desktop task
+    /// switch nor an upload delay can move the message elsewhere. Callers only
+    /// clear their draft when this returns true.
+    func send(
+        text: String,
+        attachments: [PendingMessageAttachment],
+        to chat: Chat
+    ) async -> Bool {
+        guard let client else {
+            actionError = "This computer is offline."
+            return false
+        }
+        actionError = nil
+        do {
+            try AttachmentPolicy.validate(attachments)
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty || !attachments.isEmpty else {
+                actionError = "Write a message or attach a file first."
+                return false
+            }
+
+            if attachments.contains(where: { $0.kind == .image }) {
+                let capable: Set<String>
+                do {
+                    capable = try await client.imageCapableInstanceIDs()
+                } catch APIError.status(code: 404, message: _) {
+                    actionError = "Update OpenMausBot on this computer before sending images."
+                    return false
+                }
+                guard imageSupported(by: chat, capableInstances: capable) else {
+                    actionError = imageCompatibilityMessage(for: chat)
+                    return false
+                }
+            }
+
+            let destination: MessageDestination
+            switch chat {
+            case let .bot(bot):
+                destination = .bot(id: bot.id, threadId: bot.threadId)
+            case let .room(room):
+                destination = .room(id: room.id, threadId: room.threadId)
+            }
+            let draftKey = AttachmentDraftKey(
+                destination: destination,
+                text: text,
+                attachmentIDs: attachments.map(\.id)
+            )
+            if attachmentSendIDs.count >= 20, attachmentSendIDs[draftKey] == nil {
+                attachmentSendIDs.removeAll(keepingCapacity: true)
+            }
+            let sendID = attachmentSendIDs[draftKey] ?? UUID().uuidString
+            attachmentSendIDs[draftKey] = sendID
+
+            var uploaded: [SharedAttachmentReference] = []
+            uploaded.reserveCapacity(attachments.count)
+            for attachment in attachments {
+                try Task.checkCancellation()
+                let mime = AttachmentPolicy.normalizedMIME(attachment.mime)
+                switch attachment.kind {
+                case .image:
+                    let path = try await client.uploadImage(
+                        data: attachment.data,
+                        mime: mime,
+                        uploadId: attachment.id.uuidString
+                    )
+                    uploaded.append(SharedAttachmentReference(
+                        path: path,
+                        kind: .image,
+                        displayName: attachment.name
+                    ))
+                case .file:
+                    let file = try await client.uploadFile(
+                        data: attachment.data,
+                        name: attachment.name,
+                        mime: mime,
+                        uploadId: attachment.id.uuidString
+                    )
+                    uploaded.append(SharedAttachmentReference(
+                        path: file.path,
+                        kind: .file,
+                        displayName: file.name
+                    ))
+                }
+            }
+
+            let message = SharedMessageComposer.compose(
+                instruction: text,
+                text: [],
+                urls: [],
+                attachments: uploaded
+            )
+            try await client.send(text: message, to: destination, sendId: sendID)
+            attachmentSendIDs.removeValue(forKey: draftKey)
+            actionError = nil
+            return true
+        } catch is CancellationError {
+            return false
+        } catch let error as APIError where error.isUnauthorized {
+            status = .unauthorized
+            actionError = error.localizedDescription
+            return false
+        } catch {
+            actionError = error.localizedDescription
+            return false
+        }
+    }
+
+    private func imageSupported(by chat: Chat, capableInstances: Set<String>) -> Bool {
+        switch chat {
+        case let .bot(bot):
+            return capableInstances.contains(bot.modelSelection.instanceId)
+        case let .room(room):
+            return !room.memberIds.isEmpty && room.memberIds.allSatisfy { id in
+                guard let bot = state.bot(id) else { return false }
+                return capableInstances.contains(bot.modelSelection.instanceId)
+            }
+        }
+    }
+
+    private func imageCompatibilityMessage(for chat: Chat) -> String {
+        switch chat {
+        case let .bot(bot):
+            return "\(bot.name)'s current model doesn't support images. Choose another model or remove the image."
+        case .room:
+            return "Every bot that may answer in this channel must use a model that supports images."
+        }
+    }
+
+    /// Fetch one app-owned attachment through the message that introduced it.
+    /// The caller owns presentation errors so a failed thumbnail or preview can
+    /// explain itself beside the attachment that was tapped.
+    func fetchAttachment(
+        threadId: String,
+        messageId: String,
+        path: String,
+        cacheResult: Bool = false
+    ) async throws -> DownloadedFile {
+        guard let client else {
+            throw APIError.transport("This computer is offline.")
+        }
+        let cacheKey = "\(threadId)\u{1F}\(messageId)\u{1F}\(path)"
+        if cacheResult,
+           let cached = attachmentCache.object(forKey: cacheKey as NSString) {
+            return cached.value
+        }
+        let generation = attachmentCacheGeneration
+        do {
+            // Keep this structured. When the row scrolls away SwiftUI cancels
+            // its task, which now propagates directly into URLSession instead
+            // of leaving a shared unstructured download running.
+            let download = try await client.downloadFile(
+                threadId: threadId,
+                messageId: messageId,
+                path: path
+            )
+            try Task.checkCancellation()
+            guard generation == attachmentCacheGeneration else { throw CancellationError() }
+            if cacheResult {
+                attachmentCache.setObject(
+                    CachedAttachmentDownload(download),
+                    forKey: cacheKey as NSString,
+                    cost: download.data.count
+                )
+            }
+            return download
+        } catch let error as APIError where error.isUnauthorized {
+            // A cancelled request from the previous computer may finish after
+            // a switch. Its 401 belongs to that old token and must not evict
+            // the current live session.
+            guard generation == attachmentCacheGeneration, !Task.isCancelled else {
+                throw CancellationError()
+            }
+            status = .unauthorized
+            throw error
+        } catch {
+            if Task.isCancelled || generation != attachmentCacheGeneration {
+                throw CancellationError()
+            }
+            throw error
+        }
+    }
+
+    /// Fetch and materialize an attachment in a protected temporary directory
+    /// for Quick Look, markdown/text preview, and the system share sheet.
+    func prepareAttachmentPreview(
+        threadId: String,
+        messageId: String,
+        path: String,
+        cacheResult: Bool = false
+    ) async throws -> DownloadedFile {
+        let download = try await fetchAttachment(
+            threadId: threadId,
+            messageId: messageId,
+            path: path,
+            cacheResult: cacheResult
+        )
+        try Task.checkCancellation()
+        let preparation = Task.detached(priority: .userInitiated) {
+            // Content-Disposition is the server's canonical, sanitised name.
+            // The transport tag's `name` is presentation-only and must never
+            // choose the on-disk preview/share filename.
+            try Self.materializePreview(download: download, filename: download.filename)
+        }
+        let prepared = try await withTaskCancellationHandler {
+            try await preparation.value
+        } onCancel: {
+            preparation.cancel()
+        }
+        do {
+            try Task.checkCancellation()
+            return prepared
+        } catch {
+            Self.removePreview(at: prepared.localURL)
+            throw error
+        }
+    }
+
+    /// Compatibility for file links in assistant markdown. User attachment
+    /// cards use the throwing API above so their feedback remains local.
+    func downloadFile(
+        threadId: String,
+        messageId: String,
+        path: String
+    ) async -> DownloadedFile? {
+        actionError = nil
+        do {
+            let download = try await prepareAttachmentPreview(
+                threadId: threadId,
+                messageId: messageId,
+                path: path
+            )
+            actionError = nil
+            return download
+        } catch is CancellationError {
+            return nil
+        } catch {
+            actionError = error.localizedDescription
+            return nil
+        }
+    }
+
+    private func resetAttachmentCache() {
+        attachmentCacheGeneration += 1
+        attachmentCache.removeAllObjects()
+    }
+
+    nonisolated private static func materializePreview(
+        download: DownloadedFile,
+        filename: String
+    ) throws -> DownloadedFile {
+        let manager = FileManager.default
+        let root = manager.temporaryDirectory
+            .appendingPathComponent("OpenMausBotFilePreviews", isDirectory: true)
+        let directory = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try Task.checkCancellation()
+        try manager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
+        )
+        let fileURL = directory.appendingPathComponent(filename, isDirectory: false)
+        do {
+            try download.data.write(
+                to: fileURL,
+                options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
+            )
+            try Task.checkCancellation()
+            return DownloadedFile(
+                data: download.data,
+                filename: filename,
+                contentType: download.contentType,
+                localURL: fileURL
+            )
+        } catch {
+            try? manager.removeItem(at: directory)
+            throw error
+        }
+    }
+
+    nonisolated private static func removePreview(at fileURL: URL?) {
+        guard let fileURL else { return }
+        try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent())
+    }
+
+    private static func removeStaleFilePreviews() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OpenMausBotFilePreviews", isDirectory: true)
+        try? FileManager.default.removeItem(at: root)
+    }
+
     func answer(chat: Chat, card: OptionCard, choice: String, rememberingPermission: Bool = true) async {
         guard let requestId = card.requestId else { return }
         if rememberingPermission, card.shouldRememberPermission(for: choice), case let .bot(bot) = chat {
@@ -626,13 +1165,171 @@ final class Session: ObservableObject {
             threadId: chat.threadId,
             requestId: requestId,
             choice: choice,
-            isPermission: card.isPermission
+            isPermission: card.isPermission,
+            reviewedSha256: card.skillRequest?.reviewedSha256
         )
+    }
+
+    /// Synchronously seal a credential before the caller starts an async
+    /// request. The caller can then erase its input immediately and retain
+    /// only this ciphertext value for an exact, idempotent retry.
+    func prepareCredential(
+        _ value: String,
+        chat: Chat,
+        message: Message,
+        secret: SecretRequestCardData
+    ) throws -> PreparedPhoneCredential {
+        guard let client, let connection else {
+            throw APIError.transport("This computer is offline.")
+        }
+        guard let publicKey = connection.secretPublicKey,
+              let deviceId = connection.companionDeviceId,
+              let target = secret.target,
+              let requestKey = secret.requestKey
+        else { throw PhoneSecretError.unavailable }
+        guard client.connection.activeEndpoint?.protectsCredentials == true else {
+            throw PhoneSecretError.insecureTransport
+        }
+
+        let botId = try credentialBotID(chat: chat, message: message)
+        let context = PhoneSecretRequestContext(
+            deviceId: deviceId,
+            botId: botId,
+            threadId: chat.threadId,
+            messageId: message.id,
+            target: target,
+            requestKey: requestKey
+        )
+        let keyId = try PhoneSecretCrypto.publicKeyId(publicKey)
+        let requestIdentity = phoneCredentialRequestIdentity(
+            connectionID: connection.id,
+            botID: botId,
+            context: context,
+            keyID: keyId
+        )
+        if let prepared = preparedPhoneCredentials[requestIdentity] {
+            return prepared
+        }
+        let envelope = try PhoneSecretCrypto.encrypt(
+            value,
+            publicKey: publicKey,
+            context: context
+        )
+
+        let prepared = PreparedPhoneCredential(
+            requestIdentity: requestIdentity,
+            connectionID: connection.id,
+            botID: botId,
+            messageID: message.id,
+            envelope: envelope
+        )
+        preparedPhoneCredentials[requestIdentity] = prepared
+        return prepared
+    }
+
+    /// Recover an ambiguous ciphertext-only operation when a card view is
+    /// recreated. This is deliberately in-memory: a force-quit forgets it,
+    /// while ordinary navigation, AutoFill, and reconnects do not.
+    func preparedCredential(
+        chat: Chat,
+        message: Message,
+        secret: SecretRequestCardData
+    ) -> PreparedPhoneCredential? {
+        guard let connection,
+              let publicKey = connection.secretPublicKey,
+              let deviceId = connection.companionDeviceId,
+              let target = secret.target,
+              let requestKey = secret.requestKey,
+              let botId = try? credentialBotID(chat: chat, message: message),
+              let keyId = try? PhoneSecretCrypto.publicKeyId(publicKey)
+        else { return nil }
+        let context = PhoneSecretRequestContext(
+            deviceId: deviceId,
+            botId: botId,
+            threadId: chat.threadId,
+            messageId: message.id,
+            target: target,
+            requestKey: requestKey
+        )
+        return preparedPhoneCredentials[phoneCredentialRequestIdentity(
+            connectionID: connection.id,
+            botID: botId,
+            context: context,
+            keyID: keyId
+        )]
+    }
+
+    func discardPreparedCredential(_ prepared: PreparedPhoneCredential) {
+        if preparedPhoneCredentials[prepared.requestIdentity] == prepared {
+            preparedPhoneCredentials.removeValue(forKey: prepared.requestIdentity)
+        }
+    }
+
+    private func credentialBotID(chat: Chat, message: Message) throws -> String {
+        switch chat {
+        case let .bot(bot): return bot.id
+        case .room:
+            guard let sender = message.from?.botId else {
+                throw PhoneSecretError.invalidRequest
+            }
+            return sender
+        }
+    }
+
+    private func phoneCredentialRequestIdentity(
+        connectionID: String,
+        botID: String,
+        context: PhoneSecretRequestContext,
+        keyID: String
+    ) -> String {
+        [
+            connectionID,
+            keyID,
+            botID,
+            context.threadId,
+            context.messageId,
+            context.target,
+            context.requestKey,
+        ].joined(separator: "\u{0}")
+    }
+
+    /// Send one already-sealed operation. A retry deliberately reuses the
+    /// same HPKE envelope; the desktop derives its idempotency key from these
+    /// bytes, so a lost response cannot cause a second provider save.
+    func provideCredential(_ prepared: PreparedPhoneCredential) async throws {
+        guard let client, let connection else {
+            throw APIError.transport("This computer is offline.")
+        }
+        guard connection.id == prepared.connectionID,
+              connection.companionDeviceId == prepared.envelope.deviceId,
+              let publicKey = connection.secretPublicKey,
+              (try? PhoneSecretCrypto.publicKeyId(publicKey)) == prepared.envelope.keyId
+        else { throw PhoneSecretError.unavailable }
+        guard client.connection.activeEndpoint?.protectsCredentials == true else {
+            throw PhoneSecretError.insecureTransport
+        }
+
+        do {
+            try await client.provideCredential(
+                botId: prepared.botID,
+                messageId: prepared.messageID,
+                envelope: prepared.envelope
+            )
+        } catch let error as APIError where error.isUnauthorized {
+            status = .unauthorized
+            throw error
+        }
     }
 
     /// The same answer, from something that only has the ids — the Live
     /// Activity's buttons.
-    func answer(threadId: String, requestId: String, choice: String, isPermission: Bool) async {
+    func answer(
+        threadId: String,
+        requestId: String,
+        choice: String,
+        isPermission: Bool,
+        reviewedSha256: String? = nil
+    ) async {
         await perform {
             // Permission cards answer allow/deny; a question answers with
             // the chosen text. The harness tells them apart by `behavior`.
@@ -641,7 +1338,8 @@ final class Session: ObservableObject {
                 try await $0.respond(
                     threadId: threadId,
                     requestId: requestId,
-                    behavior: behavior
+                    behavior: behavior,
+                    reviewedSha256: behavior == "allow" ? reviewedSha256 : nil
                 )
             } else {
                 try await $0.respond(threadId: threadId, requestId: requestId, behavior: "answer", message: choice)
@@ -686,6 +1384,22 @@ final class Session: ObservableObject {
             let room = try await client.createRoom(name: name, memberIds: memberIds)
             state.apply(.room(room))
             return room
+        } catch {
+            actionError = error.localizedDescription
+            return nil
+        }
+    }
+
+    /// Create a sidebar section by assigning its complete starting set in one
+    /// request. The server commits the batch before returning, then these
+    /// folds make the roster move immediately instead of waiting for SSE.
+    @discardableResult
+    func assignSection(name: String, botIds: [String]) async -> [Bot]? {
+        guard let client else { return nil }
+        do {
+            let bots = try await client.assignSection(name: name, botIds: botIds)
+            for bot in bots { state.apply(.bot(bot)) }
+            return bots
         } catch {
             actionError = error.localizedDescription
             return nil
@@ -833,6 +1547,31 @@ final class Session: ObservableObject {
 
     // MARK: - Agent profile
 
+    /// The model catalog lives on the paired computer because availability
+    /// depends on which engines are installed and signed in there.
+    func modelInstances() async -> [Instance] {
+        guard let client else { return [] }
+        do {
+            return try await client.instances()
+        } catch {
+            if !Task.isCancelled { actionError = error.localizedDescription }
+            return []
+        }
+    }
+
+    func updateModel(_ selection: ModelSelection, for bot: Bot) async -> Bot? {
+        guard let client else { return nil }
+        do {
+            let updated = try await client.updateModel(botId: bot.id, selection: selection)
+            guard !Task.isCancelled else { return nil }
+            state.apply(.bot(updated))
+            return updated
+        } catch {
+            if !Task.isCancelled { actionError = error.localizedDescription }
+            return nil
+        }
+    }
+
     func updateProfile(_ patch: BotProfilePatch, for bot: Bot) async -> Bot? {
         guard let client else { return nil }
         do {
@@ -922,6 +1661,21 @@ final class Session: ObservableObject {
         return try? await client.config()
     }
 
+    func botOverview(for bot: Bot) async -> BotOverview? {
+        guard let client else { return nil }
+        let connectionID = connection?.id
+        do {
+            let overview = try await client.overview(botId: bot.id)
+            guard !Task.isCancelled, connection?.id == connectionID else { return nil }
+            return overview
+        } catch {
+            guard !Task.isCancelled, connection?.id == connectionID else { return nil }
+            guard !(error is CancellationError), (error as? URLError)?.code != .cancelled else { return nil }
+            actionError = error.localizedDescription
+            return nil
+        }
+    }
+
     // MARK: - Routines
 
     func loadRoutines() async -> (routines: [Routine], runs: [RoutineRun]) {
@@ -979,7 +1733,7 @@ final class Session: ObservableObject {
                 pendingNotification = target
                 connect()
             } else {
-                actionError = "Pair this phone with your computer to open that task."
+                actionError = "Pair this device with your computer to open that task."
             }
             return
         }
@@ -1232,16 +1986,20 @@ extension CompanionState {
     /// so the same transcript was being traversed dozens of times per frame
     /// to produce an answer that had not changed. One pass, then sort the
     /// results.
-    var chatSummaries: [ChatSummary] {
+    /// - Parameter activity: how much of a bot's working-out the reader has
+    ///   asked to see. The preview honours it the same way the transcript
+    ///   does; `lastActivity` deliberately does not, because a thread that
+    ///   just ran a tool has still moved and should still rise in the list.
+    func chatSummaries(activity: ActivityDetail = .full) -> [ChatSummary] {
         let bots = self.bots.filter { $0.hidden != true }.map(Chat.bot)
         let rooms = self.rooms.map(Chat.room)
         return (bots + rooms)
             .map { chat in
-                let last = visibleTranscript(forThread: chat.threadId).last
+                let messages = visibleTranscript(forThread: chat.threadId)
                 return ChatSummary(
                     chat: chat,
-                    preview: Self.preview(of: last),
-                    lastActivity: last?.at ?? 0,
+                    preview: rosterPreview(messages, detail: activity),
+                    lastActivity: messages.last?.at ?? 0,
                     pinned: Self.pinned(chat)
                 )
             }
@@ -1257,20 +2015,4 @@ extension CompanionState {
         return false
     }
 
-    /// The one line a roster row shows under the name, from whichever kind of
-    /// message landed last.
-    private static func preview(of last: Message?) -> String {
-        guard let last else { return "" }
-        switch last.kind {
-        case .text: return last.text ?? ""
-        // a pending card's question is the preview; the roster row already
-        // says "waiting on you" beside it
-        case .options:
-            guard let card = last.card else { return "" }
-            return card.isPending && !card.subtitle.isEmpty ? card.subtitle : card.title
-        case .activity: return last.tool?.name ?? ""
-        case .screen: return "Screenshot"
-        case .unknown: return last.text ?? ""
-        }
-    }
 }

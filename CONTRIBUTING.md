@@ -61,7 +61,7 @@ and produces one release artifact containing:
 
 Before publishing, confirm that `package.json` has the release version and dispatch the workflow against the same
 commit used for the other platforms. Attach all five Ubuntu files to the matching release in the separate
-[`openmausbot-releases`](https://github.com/milind-soni/openmausbot-releases) repository. Then verify the checksum
+[OpenMausBot releases](https://github.com/milind-soni/OpenMausBot/releases). Then verify the checksum
 file and install the `.deb` plus launch the AppImage in a clean Ubuntu 24.04 x86_64 GNOME environment. Never combine
 packages built from different commits under one version.
 
@@ -118,6 +118,26 @@ The SPI in [`server/contracts.ts`](server/contracts.ts) is deliberately small. A
    failed spawn as a failed turn — never a hang, never a crash.
 5. Bring a contract test following the fake-CLI pattern (scripted fake process + `recordEvents`).
 
+## Agent-facing control CLIs
+
+Before claiming a server or conversation change works, use the isolated flow
+in [`docs/verification/README.md`](docs/verification/README.md). For new CLIs
+intended for automation:
+
+- Reuse an existing MCP or API operation; keep the CLI to argument parsing and
+  result formatting.
+- Mutating commands require an explicit target or an isolated launcher. Never
+  silently target the user's live app.
+- Return JSON for success and failure, use non-zero exit codes for failure, and
+  provide `--help`.
+- Errors name the failed action and the next valid step.
+- Commands that delete or overwrite data provide `--dry-run`; test that it
+  leaves state unchanged.
+- Prefer task-level subcommands and add one smoke test for the main workflow.
+
+The verification feature map is intentionally incomplete. Add an entry only
+when the shared control surface can exercise it and a permanent test proves it.
+
 ## MCP tool schemas
 
 Tool `inputSchema`s travel through every engine's own MCP-to-provider conversion before a model
@@ -135,6 +155,36 @@ how chat routine proposals failed in the field hours after 0.1.38 shipped (#544)
   fixes the next call.
 - A schema test should assert the tool surface stays flat
   (see `server/drivers/agents-proxy.test.ts` — it regexp-guards the serialized schema).
+
+## Adding a language
+
+The renderer's strings live in JSON catalogs under `src/locales/`. English
+(`src/locales/en.json`) is the source of truth (typing still flows from it). A
+language is one file plus a one-line registration, exactly like a provider
+driver:
+
+1. Copy `src/locales/en.json` to `src/locales/<code>.json`. Filenames use a
+   lowercase BCP-47 tag (`de.json`, `pt-br.json`). Translate the values; keys
+   you leave out fall back to English, so partial community packs are fine.
+2. Register it in `src/locales/index.ts`.
+3. Run `pnpm i18n:check`, then select the language in **Settings → General**.
+
+An authenticated local Claude CLI can produce a first draft; it never runs in
+CI and its output still needs human review:
+
+```sh
+# Uses the locally logged-in Claude CLI
+node scripts/generate-locale.mjs it "Italian"
+```
+
+The helper runs the model without repository access, custom instructions, or
+write-capable tools. It accepts only one complete JSON object and tracks the
+English source hash for each reviewed translation. See
+[`docs/localization.md`](docs/localization.md) for the workflow and safety rules.
+
+Only a slice of the UI is extracted so far. Move strings into the catalog
+with `t("…")` as you touch components — never in big sweeps, which conflict
+with everything.
 
 ## Platform rules
 
@@ -175,9 +225,26 @@ API keys are write-only: they land in `~/.openmausbot/config.json` via `PUT /api
 only ever reports `configured` booleans. Keep it that way — no logging keys, no echoing them in
 responses or events, no baking them into argv where another local process could read them.
 
+## Downstream forks and release ownership
+
+Changes prepared in a downstream fork should keep provenance in the pull request, not add
+fork-specific branding or ownership claims to the upstream source tree. Record the exact upstream
+commit used as the comparison base, the head branch, and the checks run after the final rebase.
+
+Fork maintainers own the binaries and update channels they publish. Before distributing a fork,
+review the application name and identifiers, signing configuration, update metadata, and every
+`electron-builder` publish target. Never upload fork artifacts or update metadata to the official
+OpenMausBot release repository, and never change the upstream publish target in a feature PR unless
+that release migration was explicitly agreed with the maintainer.
+
+An upstream PR should contain only the portable product change. Keep local build paths, account
+names, credentials, private endpoints, machine-specific configuration, and fork-only release notes
+out of its commits and screenshots.
+
 ## Before you open the PR
 
 - [ ] `pnpm typecheck` and `pnpm test` pass
+- [ ] Locale changes pass `pnpm i18n:check` and have been reviewed by a speaker
 - [ ] `pnpm check:electron` passes for desktop-shell changes
 - [ ] Ubuntu packaging changes pass `pnpm package:linux` and `node scripts/verify-linux-package.mjs`
 - [ ] New server behavior has a test; driver changes keep the contract tests green

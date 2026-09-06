@@ -1,0 +1,18 @@
+{
+  "noEngines.title": "AI エンジンをインストールして始めましょう",
+  "noEngines.intro": "{app} 自体はモデルを持ちません。ボットはこのコンピューターにインストール済みの AI CLI 上で、既存のログインを使って動きます。どれか一つをセットアップすれば、ボットが動き出します。",
+  "engines.cloud": "クラウド",
+  "engines.local": "ローカル",
+  "common.checkAgain": "再チェック",
+  "common.checking": "チェック中…",
+  "approval.held.native": "プロバイダーはこのアクションにあなたの承認を求めています。",
+  "approval.held.sandbox": "これはプロバイダーのサンドボックスを変更するため、自動で承認できるのは Full access だけです。",
+  "approval.held.localComputer": "コンピューターの操作は「常に許可」の対象外のため、あなたの判断が必要です。",
+  "approval.held.unattended": "このターンは webhook または別のボットが開始したため、Approve for me は一時停止し、すべてのアクションが確認を求めます。",
+  "approval.held.unattendedFullAccess": "このターンは webhook または別のボットが開始したため、Approve for me は一時停止し、すべてのアクションが確認を求めます。 Full access は無人でも動作し続けます。",
+  "approval.held.destructive": "これは破壊的に見えるため、Approve for me は確認のために停止しました。",
+  "approval.held.sensitive": "これは認証情報に関わるため、Approve for me は確認のために停止しました。",
+  "approval.held.needsYou": "このアクションにはあなたが必要なため、Approve for me は確認のために停止しました。",
+  "approval.held.undeliveredFull": "Full access はこの承認を配信できませんでした。",
+  "approval.held.undelivered": "Approve for me はこれに回答できませんでした。"
+}

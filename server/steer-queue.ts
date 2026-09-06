@@ -2,7 +2,7 @@
 //
 // A message sent to a bot mid-turn used to bounce with a 409. Now it waits
 // here until the bot settles, then lands in the thread and runs as ONE
-// follow-up turn whose prompt is the queued texts joined with newlines.
+// follow-up turn whose prompt is the queued texts separated by a blank line.
 //
 // The queue is memory-only and is NOT in `messages[]` while the current
 // turn is running: appending immediately would make the queued line the
@@ -66,7 +66,7 @@ export function queueSteeredMessage(
 
 /** Drain every queue whose bot is idle: append the held lines (leaf is now
  * the finished turn's last item), then one run per thread whose prompt is
- * the texts joined with newlines. `userMessage` is the last appended line
+ * the texts separated by a blank line. `userMessage` is the last appended line
  * so startTurn does not duplicate it; `excludeIds` is every drained line
  * so transcript-replay adapters do not also see earlier queued texts.
  * Entries leave the map BEFORE running so a settle racing another settle
@@ -110,7 +110,11 @@ export function drainSteeredMessages(
     }
     const last = appended.at(-1);
     if (!last) continue;
-    const prompt = entry.items.map((item) => item.prompt).join("\n");
+    // Keep each queued message on its own Markdown block boundary. A single
+    // newline can merge a trailing standalone attachment tag with the next
+    // message into one HTML block, which makes that attachment stop being a
+    // native image when the combined follow-up is dispatched.
+    const prompt = entry.items.map((item) => item.prompt).join("\n\n");
     void run(
       entry.botId,
       threadId,

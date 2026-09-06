@@ -40,8 +40,30 @@ export const CLOUD_DESKTOP_JOIN_ROUTE = {
   path: /^\/api\/bots\/[\w-]+\/computer\/join$/,
 } as const;
 
+/** A POST whose response is file bytes. Keep this exact classifier shared
+ * with the proxy: a `.json` document must not enter the ordinary JSON
+ * scrub/re-serialise path and come back as different bytes. */
+export const MESSAGE_FILE_ROUTE = {
+  method: "POST",
+  path: /^\/api\/threads\/[\w-]+\/messages\/[\w-]+\/file$/,
+} as const;
+
+export const CLOUD_DESKTOP_CONTROL_ROUTE = {
+  method: "POST",
+  path: /^\/api\/bots\/[\w-]+\/computer\/(?:control|screenshot|viewer-close)$/,
+} as const;
+
 export function isCloudDesktopJoin(method: string, path: string): boolean {
   return method === CLOUD_DESKTOP_JOIN_ROUTE.method && CLOUD_DESKTOP_JOIN_ROUTE.path.test(path);
+}
+
+export function isMessageFileDownload(method: string, path: string): boolean {
+  return method === MESSAGE_FILE_ROUTE.method && MESSAGE_FILE_ROUTE.path.test(path);
+}
+
+export function isCloudDesktopAccess(method: string, path: string): boolean {
+  return isCloudDesktopJoin(method, path)
+    || (method === CLOUD_DESKTOP_CONTROL_ROUTE.method && CLOUD_DESKTOP_CONTROL_ROUTE.path.test(path));
 }
 
 /** Every request the iOS app makes, and nothing else.
@@ -56,6 +78,7 @@ const ALLOWED: ReadonlyArray<{ method: string; path: RegExp }> = [
   { method: "GET", path: /^\/api\/config$/ },
   { method: "GET", path: /^\/api\/events$/ },
   { method: "GET", path: /^\/api\/instances$/ },
+  { method: "GET", path: /^\/api\/team-map$/ },
   // Sidecar-owned, authenticated endpoint metadata. The proxy terminates it
   // locally; it never becomes a newly exposed harness route.
   { method: "GET", path: /^\/api\/companion\/endpoints$/ },
@@ -63,27 +86,48 @@ const ALLOWED: ReadonlyArray<{ method: string; path: RegExp }> = [
   // the fleet, and making a bot
   { method: "GET", path: /^\/api\/bots$/ },
   { method: "POST", path: /^\/api\/bots$/ },
+  // One narrow, atomic organizer write. This can only file visible bots;
+  // unlike the desktop's broad PATCH it cannot alter execution policy.
+  { method: "POST", path: /^\/api\/sidebar-sections$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/messages$/ },
+  { method: "PATCH", path: /^\/api\/bots\/[\w-]+\/cards\/[\w-]+$/ },
+  { method: "POST", path: /^\/api\/bots\/[\w-]+\/respond$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/interrupt$/ },
+  { method: "DELETE", path: /^\/api\/bots\/[\w-]+\/queue\/[\w-]+$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/read$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/always-allow$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/messages\/[\w-]+\/edit$/ },
+  // A credential value crosses this one route only as an HPKE envelope. The
+  // server binds it to the authenticated device and exact pending card before
+  // Electron opens it into the OS-encrypted credential store.
+  { method: "POST", path: /^\/api\/bots\/[\w-]+\/secret-cards\/[\w-]+\/provide$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/active-branch$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/tasks$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/tasks\/[\w-]+$/ },
   { method: "PATCH", path: /^\/api\/bots\/[\w-]+\/tasks\/[\w-]+$/ },
   { method: "DELETE", path: /^\/api\/bots\/[\w-]+\/tasks\/[\w-]+$/ },
+  // Read-only summary: who the bot is, what it does and won't do, and its
+  // recent activity. No settings, no transcript — read on open and on
+  // pull-to-refresh.
+  { method: "GET", path: /^\/api\/bots\/[\w-]+\/overview$/ },
   // Paired-safe profile subset. The harness route itself rejects fields
-  // outside identity, avatar, notifications, and voice preferences.
+  // outside identity, standing instructions (soul, byte-capped), avatar,
+  // notifications, and voice preferences.
   { method: "PATCH", path: /^\/api\/bots\/[\w-]+\/profile$/ },
+  // Full model selection, but no other bot settings. The harness validates
+  // the live catalog and refuses changes while the bot is working.
+  { method: "PATCH", path: /^\/api\/bots\/[\w-]+\/model$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/avatar\/generate$/ },
   // Full cloud desktop access. The route is narrow and the proxy applies a
   // second, per-device capability check before it reaches the harness.
   CLOUD_DESKTOP_JOIN_ROUTE,
 
+  CLOUD_DESKTOP_CONTROL_ROUTE,
   // rooms — making one, and talking in one
   { method: "POST", path: /^\/api\/groups$/ },
   { method: "POST", path: /^\/api\/groups\/[\w-]+\/messages$/ },
+  { method: "POST", path: /^\/api\/groups\/[\w-]+\/interrupt$/ },
+  { method: "DELETE", path: /^\/api\/groups\/[\w-]+\/queue\/[\w-]+$/ },
   { method: "POST", path: /^\/api\/groups\/[\w-]+\/read$/ },
   { method: "POST", path: /^\/api\/groups\/[\w-]+\/tasks$/ },
   { method: "POST", path: /^\/api\/groups\/[\w-]+\/tasks\/[\w-]+$/ },
@@ -93,6 +137,7 @@ const ALLOWED: ReadonlyArray<{ method: string; path: RegExp }> = [
   // a transcript, its images, and answering an approval
   { method: "GET", path: /^\/api\/threads\/[\w-]+\/messages$/ },
   { method: "GET", path: /^\/api\/threads\/[\w-]+\/messages\/[\w-]+\/image$/ },
+  MESSAGE_FILE_ROUTE,
   { method: "POST", path: /^\/api\/threads\/[\w-]+\/messages\/[\w-]+\/reactions$/ },
   { method: "GET", path: /^\/api\/threads\/[\w-]+\/export$/ },
   { method: "POST", path: /^\/api\/threads\/[\w-]+\/respond$/ },
@@ -102,10 +147,15 @@ const ALLOWED: ReadonlyArray<{ method: string; path: RegExp }> = [
   // the harness; GET is a single bare generated filename, never a path.
   { method: "POST", path: /^\/api\/attachments$/ },
   { method: "GET", path: /^\/api\/attachments\/[\w-]+\.(?:png|jpe?g|gif|webp)$/i },
+  // Share-sheet documents are raw, capped at 25 MiB, and stored under a
+  // generated filename by the harness. The display name stays in the query;
+  // only this exact upload route crosses the companion boundary.
+  { method: "POST", path: /^\/api\/files$/ },
 
-  // Renderer-neutral voice operations. Neither route reads or writes the
-  // workspace ElevenLabs key; the phone receives labels or audio only.
+  // Renderer-neutral voice operations. These routes never expose or mutate
+  // the workspace ElevenLabs key; the client receives labels or audio only.
   { method: "GET", path: /^\/api\/tts\/voices$/ },
+  { method: "POST", path: /^\/api\/tts\/prepare$/ },
   { method: "POST", path: /^\/api\/tts\/speak$/ },
 
   // Routines create ordinary tasks using an existing agent configuration.
@@ -115,14 +165,24 @@ const ALLOWED: ReadonlyArray<{ method: string; path: RegExp }> = [
   { method: "PATCH", path: /^\/api\/routines\/[\w-]+$/ },
   { method: "DELETE", path: /^\/api\/routines\/[\w-]+$/ },
   { method: "POST", path: /^\/api\/routines\/[\w-]+\/run$/ },
+  { method: "POST", path: /^\/api\/routine-runs\/[\w-]+\/(?:cancel|seen)$/ },
 
   // Multi-account Composio management exposes opaque ids and aliases only.
-  // Revocation stays on the Mac: the account DELETE route is deliberately
-  // absent — a paired phone can see and add accounts, never remove one.
+  // Revocation stays on the host: the account DELETE route is deliberately
+  // absent — a paired client can see and add accounts, never remove one.
   { method: "GET", path: /^\/api\/connectors\/catalog$/ },
   { method: "GET", path: /^\/api\/connectors\/connected$/ },
   { method: "GET", path: /^\/api\/connectors$/ },
   { method: "POST", path: /^\/api\/connectors\/[\w-]+\/authorize$/ },
+  // Inline connector cards are scoped by bot, transcript message, and
+  // thread. They expose the same opaque OAuth authorization already allowed
+  // above, then only poll, resume, or dismiss that exact pending card.
+  { method: "GET", path: /^\/api\/bots\/[\w-]+\/connector-cards\/[\w-]+\/status$/ },
+  { method: "POST", path: /^\/api\/bots\/[\w-]+\/connector-cards\/[\w-]+\/(?:authorize|resume|dismiss)$/ },
+  // A remote client may decline or retry a credential request, but never
+  // claim that it stored a host credential. Saving and `provided` stay local
+  // to the host's OS-backed credential store.
+  { method: "POST", path: /^\/api\/bots\/[\w-]+\/secret-cards\/[\w-]+\/(?:resume|dismiss)$/ },
 ];
 
 /** Route families worth naming in the refusal.
@@ -136,7 +196,7 @@ const EXPLAINED: ReadonlyArray<{ path: RegExp; error: string }> = [
   {
     path: /^\/api\/(companion|devices)(\/|$)/,
     // Losing the phone must not mean losing the ability to lock it out.
-    error: "Phone settings are managed on your computer",
+    error: "Remote access settings are managed on the host computer",
   },
   { path: /^\/api\/config$/, error: "API keys can only be changed on your computer" },
   { path: /^\/api\/local-computer(\/|$)/, error: "the Local VM is set up on your computer" },
@@ -171,7 +231,7 @@ export function denyReason({ path, method, authenticated }: RouteRequest): Denia
   if (method === "GET" && path === "/api/health") return null;
 
   if (!authenticated) {
-    return { status: 401, error: "pair this device from Phone settings in OpenMausBot on your computer" };
+    return { status: 401, error: "pair this device from Remote access settings on the host computer" };
   }
 
   if (ALLOWED.some((route) => route.method === method && route.path.test(path))) return null;

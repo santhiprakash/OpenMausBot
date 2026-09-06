@@ -2,10 +2,13 @@
 // thread→instance binding and per-instance resume cursors — upstream's
 // ProviderSessionDirectory, recipe step 6: persist the binding from day
 // one). messages-<threadId>.json holds the folded transcript.
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import { writeFileAtomic } from "./atomic.ts";
+import { removeBotFolder, soulFile, soulHash, writeSoulMirror } from "./bot-folder.ts";
+import type { BotProfilePatch } from "./bot-profile.ts";
 import { peerAllowKey, type PeerAction } from "./peer-approval-key.ts";
 import { DATA_DIR, loadBrowserProfileIdAliases } from "./config.ts";
 import * as mdb from "./message-db.ts";
@@ -14,8 +17,13 @@ import { newId, type CloudBackend, type ModelSelection, type ThreadId } from "./
 import { pickBotName } from "./names.ts";
 import { redactSecretsInText } from "./redact.ts";
 import { botAvatarProfile, type BotAvatarCrop } from "../shared/bot-avatar.ts";
+import { isApprovalMode, type ApprovalMode } from "../shared/approval-mode.ts";
+import type { MascotBodyId } from "../shared/mascot-bodies.ts";
+import type { ProfileRequestCardData, ProfileRequestChanges } from "../shared/profile-request.ts";
 import type { RoutineRequestCardData } from "../shared/routine-request.ts";
 import type { RoutineRunCardData } from "../shared/routine-run.ts";
+import type { SkillRequestCardData } from "../shared/skill-request.ts";
+import type { GroupGoalRunCardData } from "../shared/group-goal-run.ts";
 
 export type MausColor =
   | "green"
@@ -47,8 +55,15 @@ export interface OptionCardData {
   /** permission cards: the tool being requested, so the card can show what
    * is actually being asked and offer "always allow this tool". */
   tool?: string;
-  /** why this stopped despite auto mode (destructive-looking command) */
+  /** why this card is waiting: the guard, mode, sandbox or native note from
+   * approvalHeldReason, or a delivery/apply error from a routine or profile
+   * request. Free text either way, so it is shown verbatim. */
   held?: string;
+  /** Catalog key for `held` when it is one of the fixed notes, so the client
+   * shows it in the reader's language. Absent on an apply error (free text
+   * with no key) and on every card saved before this field existed, which is
+   * why `held` still carries the English. */
+  heldCode?: string;
   /** the narrow grant "always allow" remembers, e.g. "Bash:git" */
   allowKey?: string;
   /** Local actions never share remembered grants with cloud/tool approvals. */
@@ -56,6 +71,12 @@ export interface OptionCardData {
   /** A durable chat-created routine proposal. The scheduler only applies it
    * after this card is explicitly confirmed by the user. */
   routineRequest?: RoutineRequestCardData;
+  /** A durable profile-change proposal (propose_profile). The change lands
+   * only after this card is explicitly confirmed by the user. */
+  profileRequest?: ProfileRequestCardData;
+  /** A durable learned-skill proposal. The skill stays staged until the
+   * user confirms this card — it never rides the prompt before that. */
+  skillRequest?: SkillRequestCardData;
 }
 
 export interface ConnectorCardData {
@@ -66,6 +87,8 @@ export interface ConnectorCardData {
   status: "required" | "authorizing" | "connected" | "failed";
   /** Cards created by one agent request resume together after all connect. */
   resumeKey: string;
+  /** Account alias supplied by the agent when adding a second (or first) account. */
+  alias?: string;
   error?: string;
   dismissed?: boolean;
   resumed?: boolean;
@@ -79,6 +102,9 @@ export interface SecretRequestCardData {
   placeholder: string;
   helpUrl: string;
   requestKey: string;
+  /** Exact successful HPKE operation. This contains no plaintext and prevents
+   * a freshly sealed value from being mistaken for a lost-response retry. */
+  phoneOperationId?: string;
   provided?: boolean;
   dismissed?: boolean;
   resumed?: boolean;
@@ -88,14 +114,20 @@ export interface SecretRequestCardData {
 export interface Message {
   id: string;
   role: "bot" | "user";
-  kind: "text" | "options" | "activity" | "screen" | "connector" | "secret" | "routine.run";
+  kind: "text" | "options" | "activity" | "screen" | "connector" | "secret" | "routine.run" | "goal.run";
   text?: string;
+  /** Durable provider output stored by the harness. Paths always point into
+   * OpenMausBot's private attachment directory; renderers receive only the
+   * existing allowlisted /api/attachments URL. */
+  attachments?: Array<{ kind: "image"; path: string; mime: string }>;
   card?: OptionCardData;
   connector?: ConnectorCardData;
   secret?: SecretRequestCardData;
   /** One idempotently updated status card in the conversation that created a
    * routine. The actual provider turn remains in its isolated task. */
   routineRun?: RoutineRunCardData;
+  /** Terminal receipt for a bounded multi-bot channel goal. */
+  goalRun?: GroupGoalRunCardData;
   /** activity messages: tool name + outcome. `spoken` is the same chip as
    * a phrase a voice can read ("reading a file") — computed once here so
    * call mode never has to re-derive it from the raw tool name, and absent
@@ -107,6 +139,20 @@ export interface Message {
    * model saw it mid-turn, so the transcript marks it — a reader should
    * know the reply above it may already account for this line */
   steered?: boolean;
+  /** A user-role message that did not come from a person at a keyboard:
+   * a headless server's HTTP API, reached with no paired session and no
+   * browser origin — which is to say, most often a script, and possibly a
+   * bot's own shell. Stamped rather than refused because loopback is the
+   * owner on such a server by design; but a reader (a bot's room turn, the
+   * posting budget, the transcript) must not take it for the person. */
+  via?: "api";
+  /** Provider turn that produced this message. Assistant output can arrive
+   * in several pieces around tool calls; the UI uses this identity to keep
+   * those pieces together without discarding them. */
+  turnId?: string;
+  /** The last assistant text item from a settled provider turn. Earlier text
+   * with the same turnId is progress narration, not another final answer. */
+  turnTerminal?: boolean;
   /** screen messages: a frame of the bot's computer (base64 image) */
   png?: string;
   mime?: string;
@@ -119,8 +165,22 @@ export interface Message {
   replyToId?: string;
   /** Stable client identity for at-most-once chat POST retries. */
   sendId?: string;
+  /** Per-send channel behavior. Absent is legacy quick chat. */
+  channelMode?: "chat" | "goal";
   /** group threads: which member said this (sender attribution). */
   from?: { botId: string; name: string; color: string };
+  /** Set on a room message a bot pushed in with post_to_room instead of by
+   * taking a turn there. Internal transport changes custody, not authorship:
+   * a reader's turn wraps this one in a provenance preamble rather than
+   * letting it read as ordinary room conversation. `unattended` records that
+   * nobody was watching the bot that posted it. */
+  peerPost?: { unattended?: boolean };
+  /** Set on the user-role line another bot delivered with ask_bot into this
+   * bot's own conversation. The text opens with the provenance note, but a
+   * reader that windows into the message (recall snippets, a renderer) never
+   * sees the opening — this is the same fact where it cannot be cut off.
+   * `unattended` records that nobody was watching the bot that asked. */
+  peerAsk?: { botId: string; name: string; unattended?: boolean };
   /** emoji reactions; by = "user" or a member botId. */
   reactions?: Array<{ emoji: string; by: string }>;
   /** comm chips: "Messaged @X" in the caller's chat, linking to the
@@ -253,6 +313,14 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
     if (routineRun.error) routineRun.error = redactSecretsInText(routineRun.error);
     out.routineRun = routineRun;
   }
+  if (out.goalRun) {
+    out.goalRun = {
+      ...out.goalRun,
+      goal: redactSecretsInText(out.goalRun.goal),
+      coordinatorName: redactSecretsInText(out.goalRun.coordinatorName),
+      detail: out.goalRun.detail ? redactSecretsInText(out.goalRun.detail) : undefined,
+    };
+  }
   if (out.card) {
     const card = { ...out.card } as OptionCardData & { summary?: string };
     card.title = redactSecretsInText(card.title);
@@ -289,6 +357,56 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
                 },
               }
             : { ...operation },
+      };
+    }
+    if (card.skillRequest) {
+      const originalPreview = card.skillRequest.preview;
+      const preview = originalPreview === undefined
+        ? undefined
+        : redactSecretsInText(originalPreview);
+      // Current skill proposals are scrubbed before staging and their digest
+      // binds the card to the exact SKILL.md bytes that apply will install.
+      // Keep that binding only when this store-wide safety pass is a no-op and
+      // the supplied digest already matches the persisted preview. A caller
+      // that bypassed staging (or an older malformed card) is therefore
+      // safely deny-only instead of showing one document and approving
+      // another.
+      const previewSha256 = preview !== undefined && preview === originalPreview
+        ? createHash("sha256").update(preview).digest("hex")
+        : undefined;
+      const sha256 = card.skillRequest.sha256 !== undefined
+        && card.skillRequest.sha256 === previewSha256
+        ? card.skillRequest.sha256
+        : undefined;
+      card.skillRequest = {
+        ...card.skillRequest,
+        gist: redactSecretsInText(card.skillRequest.gist),
+        source: card.skillRequest.source === undefined
+          ? undefined
+          : redactSecretsInText(card.skillRequest.source),
+        preview,
+        sha256,
+        warnings: card.skillRequest.warnings.map((warning) => redactSecretsInText(warning)),
+      };
+    }
+    // A profile proposal's before/after text (and its reason) is hidden
+    // under the card's visible summary the same way a routine's or skill's
+    // is — scrub it too so nesting it on a card cannot bypass the
+    // transcript's secret-redaction boundary.
+    if (card.profileRequest) {
+      const scrubChanges = (changes: ProfileRequestChanges): ProfileRequestChanges => {
+        const out: ProfileRequestChanges = {};
+        for (const [key, value] of Object.entries(changes)) {
+          out[key as keyof ProfileRequestChanges] = redactSecretsInText(value);
+        }
+        return out;
+      };
+      card.profileRequest = {
+        ...card.profileRequest,
+        targetName: redactSecretsInText(card.profileRequest.targetName),
+        reason: redactSecretsInText(card.profileRequest.reason),
+        before: scrubChanges(card.profileRequest.before),
+        changes: scrubChanges(card.profileRequest.changes),
       };
     }
     out.card = card;
@@ -351,9 +469,24 @@ export interface BotRecord {
   name: string;
   title: string;
   description: string;
+  /** Standing instructions — the persona body. Canonical HERE; SOUL.md in
+   * the bot folder is a mirror the server writes. Never read the file to
+   * build a prompt: a bot that reads untrusted content must not be able to
+   * rewrite its own persona through the filesystem. Optional only so a
+   * bots.json written before the field existed still parses; load
+   * backfills it, so every live record has a string. */
+  soul?: string;
+  /** sha256 of `soul`, for spotting a SOUL.md edited outside the app. */
+  soulHash?: string;
+  /** The mirror differed from `soul` at the last turn dispatch. The Soul
+   * editor shows the diff; a user action (apply or discard) clears it. */
+  soulDrift?: boolean;
+  /** Receipt committed with a confirmed profile, for retrying card settlement. */
+  lastProfileRequestId?: string;
   notifications: boolean;
   color: MausColor;
   mascotExpression?: MausExpression | null;
+  mascotBody?: MascotBodyId | null;
   /** App-owned attachment served as this bot's custom profile image. */
   avatarUrl?: string;
   /** Mascot, or the crop applied to avatarUrl. */
@@ -362,9 +495,10 @@ export interface BotRecord {
   modelSelection: ModelSelection;
   /** provider-native continuation per instance (e.g. claude session id) */
   resumeCursors: Record<string, unknown>;
-  /** which computer the bot acts on: its cloud box, this Mac (local CUA),
-   * or none. Unset = auto (box when it exists, else local when available). */
-  computer?: "cloud" | "vm" | "local" | "off";
+  /** where the bot works ("Works on"): its cloud box, the Local VM, this
+   * computer (local CUA), only the built-in browser tab, or nowhere.
+   * Unset = auto (box when it exists, else local when available). */
+  computer?: "cloud" | "vm" | "local" | "browser" | "off";
   /** Which cloud computer backs `computer: "cloud"`; absent means Box. */
   cloudBackend?: CloudBackend;
   /** Auto mode may prepare/start this bot's managed VPS container. Off by
@@ -377,6 +511,18 @@ export interface BotRecord {
    * working instead of stopping to ask. Questions it asks YOU still come
    * through, and a short list of destructive commands still stops it. */
   autoApprove?: boolean;
+  /** Canonical approval level. Missing means a legacy record and resolves
+   * through autoApprove (true = safe Auto, otherwise Ask). */
+  approvalMode?: ApprovalMode;
+  /** Server-private elevation journal. Full/Custom executes as Ask until
+   * Electron confirms the exact prepared reply and then activates it over
+   * the utility-process channel. Any marker surviving a restart is revoked
+   * during Store load. */
+  approvalGrant?: {
+    requestId: string;
+    mode: "full" | "custom";
+    phase: "prepared" | "confirmed" | "activated" | "committed";
+  };
   /** Optional model review of otherwise undecided, attended approval cards.
    * Unknown persisted values are treated as off by the review boundary. */
   autoReview?: "off" | "shadow" | "enforce";
@@ -408,6 +554,15 @@ export interface BotRecord {
    * delegate_bot). Off by default: a chief-of-staff-style bot is most
    * useful when it can coordinate without nagging. */
   approvePeerComms?: boolean;
+  /** Bot ids this bot is allowed to contact. Unset keeps the rule the app
+   * shipped with — every visible bot in the same section — because that is
+   * what every existing workspace already relies on. An explicit list wires
+   * this bot to exactly those peers (and `[]` to none), which is the only
+   * way to bound one bot's reach inside the unsectioned team, where every
+   * bot the user never filed shares a section. Enforced in one place, by
+   * peer-roster.ts, for the roster, list_bots, ask_bot and delegate_bot
+   * alike. */
+  peers?: string[];
   /** Whether this bot may use the workspace's connected apps (Composio).
    * Unset/true = allowed (the user configured the key deliberately);
    * false = this bot never receives the connection. Imported team members
@@ -542,12 +697,6 @@ export function roomResponders<T extends { id: string; name: string; hidden?: bo
   return [];
 }
 
-const onboardingCard = (): OptionCardData => ({
-  title: "What do you mostly want help with?",
-  subtitle: "Pick whatever's closest; we can always expand from there.",
-  options: ["Work & projects", "Writing & research", "Life admin", "A bit of everything"],
-});
-
 /** Messages form a tree (forks appear when a message is edited); the
  * visible conversation is the path from the root to activeLeafId. */
 interface ThreadState {
@@ -588,6 +737,21 @@ export class Store {
       if (b.busy || (b.activity !== undefined && b.activity !== "idle")) botsMigrated = true;
       b.busy = false;
       b.activity = "idle";
+      if (typeof b.soul !== "string") {
+        b.soul = "";
+        botsMigrated = true;
+      }
+      if (b.soulHash !== soulHash(b.soul)) {
+        b.soulHash = soulHash(b.soul);
+        botsMigrated = true;
+      }
+      // Existing bots predate their folders. Create missing mirrors before
+      // their first history write, but preserve any edits already on disk.
+      if (!existsSync(soulFile(b.id))) {
+        try { writeSoulMirror(b.id, b.soul); } catch (e) {
+          console.warn(`[bot-folder] could not create SOUL.md for ${b.id}: ${(e as Error).message}`);
+        }
+      }
       if (b.browserProfile) {
         const browserProfile = browserProfileAliases.get(b.browserProfile);
         if (browserProfile && browserProfile !== b.browserProfile) {
@@ -601,6 +765,21 @@ export class Store {
       }
       if (b.autoStartVps !== undefined && b.autoStartVps !== true && b.autoStartVps !== false) {
         delete b.autoStartVps;
+        botsMigrated = true;
+      }
+      if (b.approvalMode !== undefined && !isApprovalMode(b.approvalMode)) {
+        delete b.approvalMode;
+        botsMigrated = true;
+      }
+      // A trusted elevation is a prepare/confirm/activate commit. If the
+      // desktop process or its private reply path died before activation,
+      // the durable marker survives beside the mode in the same atomic
+      // bots.json write. Revoke it before schedulers, listeners, or HTTP can
+      // start any new work.
+      if (b.approvalGrant !== undefined) {
+        b.approvalMode = "ask";
+        b.autoApprove = false;
+        delete b.approvalGrant;
         botsMigrated = true;
       }
       const avatar = botAvatarProfile(b);
@@ -709,8 +888,8 @@ export class Store {
     }
   }
 
-  private saveBots() {
-    writeFileAtomic(BOTS_FILE, JSON.stringify(this.bots, null, 2));
+  private saveBots(bots: BotRecord[] = this.bots) {
+    writeFileAtomic(BOTS_FILE, JSON.stringify(bots, null, 2));
   }
 
   private saveGroups() {
@@ -833,6 +1012,55 @@ export class Store {
     return true;
   }
 
+  /** A process restart cannot preserve an in-flight room orchestrator. Close
+   * every durable working receipt before clients load it, including manual
+   * goals that do not have a RoutineRun record to reconcile separately. */
+  reconcileInterruptedGroupGoals(
+    resolve?: (
+      runId: string,
+      threadId: string,
+    ) => {
+      status: Exclude<GroupGoalRunCardData["status"], "working">;
+      detail: string;
+      finishedAt: number;
+    } | null,
+    fallbackDetail = "OpenMausBot restarted before this goal finished.",
+    fallbackFinishedAt = Date.now(),
+  ): number {
+    const ownedThreadIds = new Set<string>();
+    for (const group of this.groups) {
+      ownedThreadIds.add(group.threadId);
+      for (const task of group.tasks ?? []) ownedThreadIds.add(task.threadId);
+    }
+    // load() already migrated every legacy transcript file into SQLite, so
+    // this recovery query is proportional to unfinished goals, not history.
+    let recovered = 0;
+    for (const hit of mdb.workingGoalRunMessages()) {
+      if (!ownedThreadIds.has(hit.threadId) || !hit.message.goalRun) continue;
+      const resolution = resolve?.(hit.message.goalRun.runId, hit.threadId) ?? {
+        status: "failed" as const,
+        detail: fallbackDetail,
+        finishedAt: fallbackFinishedAt,
+      };
+      const state = resolution.status === "needs-input"
+        ? "needs your input"
+        : resolution.status === "limit-reached"
+          ? "reached its turn limit"
+          : resolution.status;
+      this.patchMessage(hit.threadId, hit.message.id, {
+        text: `Goal ${state}: ${resolution.detail}`,
+        goalRun: {
+          ...hit.message.goalRun,
+          status: resolution.status,
+          detail: resolution.detail,
+          finishedAt: resolution.finishedAt,
+        },
+      });
+      recovered += 1;
+    }
+    return recovered;
+  }
+
   // ── channel tasks ────────────────────────────────────────────────────
   groupTasks(groupId: string): GroupTaskRecord[] {
     const group = this.group(groupId);
@@ -850,7 +1078,7 @@ export class Store {
     return group.tasks?.find((task) => task.threadId === threadId);
   }
 
-  createGroupTask(groupId: string, title?: string): GroupTaskRecord | null {
+  createGroupTask(groupId: string, title?: string, activate = true): GroupTaskRecord | null {
     const group = this.group(groupId);
     if (!group || group.dm) return null;
     const task: GroupTaskRecord = {
@@ -859,9 +1087,11 @@ export class Store {
       createdAt: Date.now(),
     };
     group.tasks = [task, ...(group.tasks ?? [])];
-    group.threadId = task.threadId;
-    group.pinnedCwd = undefined;
-    group.pinnedMessageId = undefined;
+    if (activate) {
+      group.threadId = task.threadId;
+      group.pinnedCwd = undefined;
+      group.pinnedMessageId = undefined;
+    }
     this.saveGroups();
     this.emit({ type: "group", groupId });
     return task;
@@ -946,6 +1176,14 @@ export class Store {
     return this.thread(threadId).messages;
   }
 
+  /** Used only with newly allocated import threads. No live actions are
+   * replayed: the importer supplies inert text and freshly remapped IDs. */
+  importTranscript(threadId: string, messages: Message[], activeLeafId: string | null): void {
+    if (this.messagesFor(threadId).length) throw new Error("Cannot import over an existing conversation");
+    mdb.importThread(threadId, messages, activeLeafId);
+    this.threads.delete(threadId);
+  }
+
   activeLeaf(threadId: string): string | null {
     return this.thread(threadId).activeLeafId;
   }
@@ -961,6 +1199,21 @@ export class Store {
       cur = cur.parentId ? byId.get(cur.parentId) : undefined;
     }
     return path.reverse();
+  }
+
+  /** Mark the last assistant text on the active branch as this turn's final
+   * visible answer. If a provider ends after commentary without emitting a
+   * separate answer, that commentary remains visible as the safe fallback. */
+  markTerminalAssistantMessage(threadId: string, turnId: string): Message | null {
+    const path = this.activePath(threadId);
+    for (let i = path.length - 1; i >= 0; i -= 1) {
+      const message = path[i];
+      if (message.role === "bot" && message.kind === "text" && message.turnId === turnId) {
+        if (message.turnTerminal) return message;
+        return this.patchMessage(threadId, message.id, { turnTerminal: true });
+      }
+    }
+    return null;
   }
 
   appendMessage(threadId: string, message: Omit<Message, "id" | "at"> & { at?: number }): Message {
@@ -980,6 +1233,34 @@ export class Store {
     // transcript is just the greeting plus what they said. Cards with a
     // requestId are permission/question prompts and stay until answered.
     if (full.role === "user" && full.kind === "text") this.dismissOnboardingCard(threadId);
+    return full;
+  }
+
+  /** Insert a message into the active chain directly after `anchorId` — the
+   * home for turn artifacts that finish AFTER the world moved on (the
+   * settle-time screen capture races a fast follow-up send, which used to
+   * leave the user's message stranded above the screenshot). When the anchor
+   * is still the leaf this is a plain append; otherwise the anchor's
+   * children are re-parented onto the inserted message, so the transcript
+   * reads turn → artifact → follow-up and the leaf stays where it was. */
+  insertMessageAfter(threadId: string, anchorId: string | undefined, message: Omit<Message, "id" | "at">): Message {
+    const t = this.thread(threadId);
+    const anchorExists = anchorId !== undefined && t.messages.some((m) => m.id === anchorId);
+    if (!anchorExists || t.activeLeafId === anchorId) return this.appendMessage(threadId, message);
+    const full: Message = { id: newId(), at: Date.now(), ...redactBotAuthored(message), parentId: anchorId };
+    const children = t.messages.filter((m) => m.parentId === anchorId);
+    t.messages.push(full);
+    mdb.appendMessage(threadId, full);
+    if (full.kind === "screen") {
+      for (const pruned of this.pruneScreenFrames(t)) {
+        mdb.updateMessage(threadId, pruned);
+        this.emit({ type: "message.patch", threadId, message: pruned });
+      }
+    }
+    this.emit({ type: "message", threadId, message: full });
+    // announced after the insert so no client ever sees two siblings
+    // claiming the same parent
+    for (const child of children) this.patchMessage(threadId, child.id, { parentId: full.id });
     return full;
   }
 
@@ -1057,10 +1338,14 @@ export class Store {
     const t = this.thread(threadId);
     const idx = t.messages.findIndex((m) => m.id === messageId);
     if (idx === -1) return null;
-    t.messages[idx] = { ...t.messages[idx], ...patch, card: patch.card ?? t.messages[idx].card };
-    mdb.updateMessage(threadId, t.messages[idx]);
-    this.emit({ type: "message.patch", threadId, message: t.messages[idx] });
-    return t.messages[idx];
+    const next = { ...t.messages[idx], ...patch, card: patch.card ?? t.messages[idx].card };
+    // SQLite is the durable source of truth. Persist before changing memory so
+    // a failed write cannot make this process believe a card was answered
+    // while a restart would still show it as pending.
+    mdb.updateMessage(threadId, next);
+    t.messages[idx] = next;
+    this.emit({ type: "message.patch", threadId, message: next });
+    return next;
   }
 
   bot(id: string) {
@@ -1073,7 +1358,10 @@ export class Store {
 
   createBot(
     profile: Partial<
-      Pick<BotRecord, "name" | "title" | "description" | "color" | "mascotExpression" | "modelSelection" | "section">
+      Pick<
+        BotRecord,
+        "name" | "title" | "description" | "soul" | "color" | "mascotExpression" | "mascotBody" | "modelSelection" | "section"
+      >
     > = {},
     opts: {
       /** false = no greeting/onboarding seed. Imported bots must not open
@@ -1089,9 +1377,12 @@ export class Store {
       name,
       title: profile.title ?? "",
       description: profile.description ?? "",
+      soul: profile.soul ?? "",
+      soulHash: soulHash(profile.soul ?? ""),
       notifications: true,
       color: profile.color ?? COLORS[this.bots.length % COLORS.length],
       ...(profile.mascotExpression ? { mascotExpression: profile.mascotExpression } : {}),
+      ...(profile.mascotBody ? { mascotBody: profile.mascotBody } : {}),
       unread: false,
       modelSelection: profile.modelSelection ?? this.defaultSelection(),
       resumeCursors: {},
@@ -1101,16 +1392,24 @@ export class Store {
     bot.tasks = [{ threadId: bot.threadId, title: UNTITLED_TASK, createdAt: bot.createdAt, resumeCursors: {} }];
     this.bots.unshift(bot);
     this.saveBots();
+    // The folder exists from the first moment, so the user can open
+    // SOUL.md before the bot has said a word. The record is canonical: a
+    // mirror-write failure must never fail bot creation.
+    try {
+      writeSoulMirror(bot.id, bot.soul ?? "");
+    } catch (e) {
+      console.warn(`[bot-folder] could not write SOUL.md mirror for ${bot.id}: ${(e as Error).message}`);
+    }
     // Announce the owner before its onboarding transcript. SSE clients need
     // the bot/thread mapping before they can place either message.
     this.emit({ type: "bot", botId: bot.id });
+    // Keep the greeting valid for configured bots and every engine.
     if (opts.seedMessages !== false) {
       this.appendMessage(bot.threadId, {
         role: "bot",
         kind: "text",
-        text: `Hey — I'm ${name}. Nice to meet you.`,
+        text: `Hi, I'm ${name}. What would you like me to do?`,
       });
-      this.appendMessage(bot.threadId, { role: "bot", kind: "options", card: onboardingCard() });
     }
     return bot;
   }
@@ -1128,6 +1427,14 @@ export class Store {
     try {
       rmSync(workspaceDir(id), { recursive: true, force: true });
     } catch {}
+    // Approval state deliberately lives outside the bot-writable workspace.
+    // It still belongs to the bot, so deleting the bot must remove staged
+    // proposals, manifests, and native-link ownership records with it.
+    try {
+      rmSync(join(DATA_DIR, "skill-state", id), { recursive: true, force: true });
+    } catch {}
+    // The bot folder (SOUL.md mirror) is the bot's too.
+    removeBotFolder(id);
     this.saveBots();
     this.emit({ type: "bot.deleted", botId: id });
     return true;
@@ -1136,10 +1443,89 @@ export class Store {
   patchBot(id: string, patch: Partial<BotRecord>): BotRecord | null {
     const bot = this.bot(id);
     if (!bot) return null;
+    // Runtime revocations must become effective in memory even when disk is
+    // unavailable. Profile edits use the separate atomic path below.
     Object.assign(bot, patch);
     this.saveBots();
     this.emit({ type: "bot", botId: id });
     return bot;
+  }
+
+  /** Commit a validated profile change before publishing its fields. Unlike
+   * runtime revocation, a failed user edit must leave the old profile intact. */
+  patchBotProfile(id: string, patch: BotProfilePatch & Partial<Pick<BotRecord, "cwd" | "lastProfileRequestId">>): BotRecord | null {
+    const bot = this.bot(id);
+    if (!bot) return null;
+    const next = { ...bot, ...patch };
+    if (patch.soul !== undefined) {
+      next.soulHash = soulHash(patch.soul);
+      next.soulDrift = false;
+    }
+    // Persist all fields together before publishing anything to the live
+    // record. A failed write leaves both memory and disk at the old profile.
+    this.saveBots(this.bots.map((candidate) => candidate.id === id ? next : candidate));
+    Object.assign(bot, next);
+    if (patch.soul !== undefined) {
+      try { writeSoulMirror(id, patch.soul); } catch (e) {
+        console.warn(`[bot-folder] could not write SOUL.md mirror for ${id}: ${(e as Error).message}`);
+      }
+    }
+    this.emit({ type: "bot", botId: id });
+    return bot;
+  }
+
+  /** Convenience for a soul-only change. The record is canonical; a failed
+   * mirror write is reported in logs and can be retried by discarding drift. */
+  setSoul(id: string, soul: string): BotRecord | null {
+    return this.patchBotProfile(id, { soul });
+  }
+
+  /** File visible bots into one sidebar section as a single durable write.
+   *
+   * This deliberately stages the complete next file before touching the
+   * live records. A missing/hidden target therefore changes nothing, and a
+   * failed atomic write cannot leave memory ahead of disk. A Chief collision
+   * is refused rather than silently removing somebody's coordinator role. */
+  setBotsSection(
+    botIds: string[],
+    section: string,
+  ): { ok: true; bots: BotRecord[] } | { ok: false; reason: "unavailable" | "chief-conflict" } {
+    const ids = [...new Set(botIds)];
+    const targets = ids.map((id) => this.bot(id));
+    if (targets.some((bot) => !bot || bot.hidden)) return { ok: false, reason: "unavailable" };
+
+    const targetSection = sectionKey(section);
+    const selected = targets as BotRecord[];
+    const destinationChiefIds = new Set([
+      ...selected.filter((bot) => bot.chiefOfStaff).map((bot) => bot.id),
+      ...this.bots
+        .filter((bot) => bot.chiefOfStaff && sectionKey(bot.section) === targetSection)
+        .map((bot) => bot.id),
+    ]);
+    if (destinationChiefIds.size > 1) return { ok: false, reason: "chief-conflict" };
+
+    const patches = new Map<string, Partial<BotRecord>>();
+    for (const bot of selected) {
+      patches.set(bot.id, { section: targetSection || undefined });
+    }
+
+    const changedIds = new Set<string>();
+    const nextBots = this.bots.map((bot) => {
+      const patch = patches.get(bot.id);
+      if (!patch) return bot;
+      const next = { ...bot, ...patch };
+      if (JSON.stringify(next) !== JSON.stringify(bot)) changedIds.add(bot.id);
+      return next;
+    });
+    if (changedIds.size) {
+      this.saveBots(nextBots);
+      for (const bot of this.bots) {
+        const patch = patches.get(bot.id);
+        if (patch) Object.assign(bot, patch);
+      }
+      for (const botId of changedIds) this.emit({ type: "bot", botId });
+    }
+    return { ok: true, bots: ids.map((id) => this.bot(id)!) };
   }
 
   /** The one way runtime state changes. Sets `activity` and derives `busy`

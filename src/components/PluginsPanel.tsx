@@ -7,6 +7,8 @@ import { Check, Loader2, RefreshCw, Search, TriangleAlert, X } from "lucide-reac
 import { api, useStore } from "@/state/store";
 import { cn } from "@/lib/cn";
 import { readCachedInventory, writeCachedInventory } from "@/lib/connected-apps-cache";
+import { managedConnectorUnavailableReason } from "../../shared/connector-availability";
+import { McpServersPanel } from "./McpServersPanel";
 
 interface ToolkitCard {
   slug: string;
@@ -83,6 +85,10 @@ export function disconnectAccountConfirmation(
   return `Disconnect ${identity} from ${service}? Only this ${service} account will be revoked. Your other ${service} accounts will stay connected.`;
 }
 
+export function connectedAppsMayDisconnect(remoteClient: boolean): boolean {
+  return !remoteClient;
+}
+
 export function requiresAccountAlias(message: string) {
   return /account alias.*existing connection.*not replaced/i.test(message);
 }
@@ -91,13 +97,14 @@ export type ConnectorInventoryPhase = "loading" | "ready" | "error";
 
 export function connectorActionLabel(
   phase: ConnectorInventoryPhase,
-  state: { busy: boolean; included: boolean; canContinue: boolean; hasAccounts: boolean; failed: boolean },
+  state: { busy: boolean; included: boolean; canContinue: boolean; pending?: boolean; hasAccounts: boolean; failed: boolean },
 ) {
   if (state.busy) return null;
   if (state.included) return "Included";
   if (phase === "loading") return "Checking…";
   if (phase === "error") return "Unavailable";
   if (state.canContinue) return "Continue";
+  if (state.pending) return "Check status";
   if (state.hasAccounts) return "Add account";
   if (state.failed) return "Retry";
   return "Connect";
@@ -170,14 +177,25 @@ export function onlyLatestConnectorResponses(
 function ServiceIcon({ card }: { card: ToolkitCard }) {
   // 0 = official logo, 1 = favicon by domain, 2 = monogram
   const [stage, setStage] = useState(card.logo ? 0 : card.domain ? 1 : 2);
+  // The full catalog is well over a thousand cards, so let the browser skip
+  // the logos that are scrolled out of view instead of fetching every one.
   if (stage === 0 && card.logo) {
-    return <img src={card.logo} alt="" className="size-11 rounded-xl object-contain" onError={() => setStage(1)} />;
+    return (
+      <img
+        src={card.logo}
+        alt=""
+        loading="lazy"
+        className="size-11 rounded-xl object-contain"
+        onError={() => setStage(1)}
+      />
+    );
   }
   if (stage === 1 && card.domain) {
     return (
       <img
         src={`https://www.google.com/s2/favicons?domain=${card.domain}&sz=64`}
         alt=""
+        loading="lazy"
         className="size-11 rounded-xl object-contain"
         onError={() => setStage(2)}
       />
@@ -192,7 +210,10 @@ function ServiceIcon({ card }: { card: ToolkitCard }) {
 
 export function PluginsPanel() {
   const { dispatch } = useStore();
+  const remoteClient = window.ogb?.remoteClient?.active === true;
+  const mayDisconnect = connectedAppsMayDisconnect(remoteClient);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const [surface, setSurface] = useState<"apps" | "mcp">("apps");
   const [cards, setCards] = useState<ToolkitCard[] | null>(null);
   const [source, setSource] = useState<"api" | "curated">("curated");
   const [configured, setConfigured] = useState(true);
@@ -476,27 +497,29 @@ export function PluginsPanel() {
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-labelledby="connected-apps-title"
+        aria-labelledby="plugins-title"
         tabIndex={-1}
         className="animate-pop-in flex h-[min(780px,calc(100dvh-2rem))] w-full max-w-[1040px] flex-col overflow-hidden rounded-[24px] border border-hairline/50 bg-panel shadow-2xl shadow-black/50"
       >
         <header className="flex items-start justify-between gap-4 px-6 pb-3 pt-6 sm:px-8 sm:pt-7">
           <div>
-            <h2 id="connected-apps-title" className="text-[22px] font-semibold tracking-[-0.01em] text-ink">Connected apps</h2>
-            <p className="mt-1 text-[13px] text-ink-secondary">Connect the apps your bots can use.</p>
+            <h2 id="plugins-title" className="text-[22px] font-semibold tracking-[-0.01em] text-ink">Plugins</h2>
+            <p className="mt-1 text-[13px] text-ink-secondary">Connect apps and your own MCP tools.</p>
           </div>
           <div className="flex items-center gap-1">
-            <button
-              onClick={() => void loadConnectionInventory(true)}
-              disabled={refreshing}
-              className="rounded-lg p-2 text-ink-secondary hover:bg-raised hover:text-ink disabled:opacity-50"
-              title="Refresh connection status"
-            >
-              <RefreshCw size={17} className={cn(refreshing && "animate-spin")} />
-            </button>
+            {surface === "apps" && (
+              <button
+                onClick={() => void loadConnectionInventory(true)}
+                disabled={refreshing}
+                className="rounded-lg p-2 text-ink-secondary hover:bg-raised hover:text-ink disabled:opacity-50"
+                title="Refresh connection status"
+              >
+                <RefreshCw size={17} className={cn(refreshing && "animate-spin")} />
+              </button>
+            )}
             <button
               onClick={close}
-              aria-label="Close connected apps"
+              aria-label="Close plugins"
               className="rounded-lg p-2 text-ink-secondary hover:bg-raised hover:text-ink"
             >
               <X size={21} />
@@ -504,6 +527,28 @@ export function PluginsPanel() {
           </div>
         </header>
 
+        <div className="border-b border-hairline/40 px-6 sm:px-8">
+          <div className="flex gap-6" role="tablist" aria-label="Plugin type">
+            {(["apps", "mcp"] as const).map((item) => (
+              <button
+                key={item}
+                type="button"
+                role="tab"
+                aria-selected={surface === item}
+                onClick={() => setSurface(item)}
+                className={cn(
+                  "border-b-2 px-0.5 pb-3 pt-1 text-[13.5px] font-medium transition-colors",
+                  surface === item ? "border-accent text-ink" : "border-transparent text-ink-secondary hover:text-ink",
+                )}
+              >
+                {item === "apps" ? "Connected apps" : "MCP servers"}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {surface === "apps" ? (
+          <>
         {stale && (
           // Say which of the two things is true. Silence here is what makes a
           // remembered list indistinguishable from a confirmed one.
@@ -558,9 +603,9 @@ export function PluginsPanel() {
             connection service" is advice for someone who never set one up. */}
         {!configured && !stale && (
           <div className="mx-6 mb-1 rounded-xl bg-warning/10 px-4 py-3 text-[13px] text-warning sm:mx-8">
-            Connected apps are temporarily unavailable. You can retry after restarting, or configure your own connection service.{" "}
+            Connected apps are temporarily unavailable. Retry after restarting the host, or configure the connection service there.{" "}
             <button
-              className="font-medium underline underline-offset-2"
+              className={cn("font-medium underline underline-offset-2", remoteClient && "hidden")}
               onClick={() => {
                 close();
                 dispatch({ type: "toggleAppSettings", open: true });
@@ -570,7 +615,7 @@ export function PluginsPanel() {
             </button>
           </div>
         )}
-        {configured && source === "curated" && mode === "self-hosted" && (
+        {configured && !remoteClient && source === "curated" && mode === "self-hosted" && (
           <div className="mx-6 mb-1 text-[12px] text-ink-secondary sm:mx-8">
             Showing featured apps.{" "}
             <button
@@ -608,8 +653,9 @@ export function PluginsPanel() {
               // pointless authorize. It ships included.
               const included = card.noAuth === true
                 || (serviceStatus?.connected === true && !accounts.length && !pending && !failed);
-              const addingAccount = aliasSlug === card.slug;
+              const addingAccount = aliasSlug === card.slug && !pending;
               const busy = busySlug === card.slug;
+              const unavailableReason = managedConnectorUnavailableReason(mode, card.slug);
               return (
                 <div
                   key={card.slug}
@@ -619,31 +665,53 @@ export function PluginsPanel() {
                     <ServiceIcon card={card} />
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-[14px] font-medium text-ink">{card.label}</div>
-                      <div className="mt-0.5 truncate text-[12.5px] text-ink-secondary">
-                        {pending ? "Finish setup in your browser" : failed && !accounts.length ? "Authorization expired — try again" : card.blurb}
+                      <div
+                        className="mt-0.5 truncate text-[12.5px] text-ink-secondary"
+                        title={unavailableReason ?? undefined}
+                      >
+                        {unavailableReason ?? (
+                          pending
+                            ? pendingUrls[card.slug]
+                              ? "Finish setup in your browser"
+                              : "Finish setup in your browser, or disconnect the pending account below to start again"
+                            : failed && !accounts.length
+                              ? "Authorization expired — try again"
+                              : card.blurb
+                        )}
                       </div>
                     </div>
                     <button
                       type="button"
-                      disabled={!configured || inventoryPhase !== "ready" || busy || included}
+                      disabled={!configured || inventoryPhase !== "ready" || busy || included || Boolean(unavailableReason)}
+                      title={unavailableReason ?? undefined}
                       onClick={() => {
-                        if (pending && pendingUrls[card.slug]) {
-                          setError(null);
-                          void openConnectUrl(pendingUrls[card.slug]).catch((e) => setError(e.message));
-                        } else if (accounts.length) {
+                        if (pending) {
+                          if (pendingUrls[card.slug]) {
+                            setError(null);
+                            void openConnectUrl(pendingUrls[card.slug]).catch((e) => setError(e.message));
+                          } else {
+                            setAliasSlug(null);
+                            setError(null);
+                            void refreshStatus([card.slug]);
+                            startPolling(card.slug);
+                          }
+                        } else {
                           setAliasSlug((current) => current === card.slug ? null : card.slug);
                           setAliasDraft("");
-                        } else void connect(card.slug);
+                        }
                       }}
                       className="flex min-w-[88px] items-center justify-center gap-1.5 rounded-full bg-raised px-3 py-2 text-[12.5px] text-ink transition-colors hover:bg-raised-hover disabled:opacity-40"
                     >
-                      {busy ? (
+                      {unavailableReason ? (
+                        "Self-host only"
+                      ) : busy ? (
                         <Loader2 size={13} className="mx-auto animate-spin" />
                       ) : (
                         connectorActionLabel(inventoryPhase, {
                           busy,
                           included,
                           canContinue: Boolean(pending && pendingUrls[card.slug]),
+                          pending,
                           hasAccounts: accounts.length > 0,
                           failed: Boolean(failed),
                         })
@@ -665,18 +733,20 @@ export function PluginsPanel() {
                                 {account.alias ? `${account.id} · ` : ""}{account.status.toLowerCase()}
                               </div>
                             </div>
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() => {
-                                if (!window.confirm(disconnectAccountConfirmation(card.label, account))) return;
-                                disconnectAccount(card.slug, account.id);
-                              }}
-                              className="rounded-md px-2 py-1 text-[11px] text-ink-secondary transition-colors hover:bg-danger/10 hover:text-danger disabled:opacity-40"
-                              aria-label={`Disconnect ${account.alias || account.id} from ${card.label}`}
-                            >
-                              Disconnect
-                            </button>
+                            {mayDisconnect && (
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => {
+                                  if (!window.confirm(disconnectAccountConfirmation(card.label, account))) return;
+                                  disconnectAccount(card.slug, account.id);
+                                }}
+                                className="rounded-md px-2 py-1 text-[11px] text-ink-secondary transition-colors hover:bg-danger/10 hover:text-danger disabled:opacity-40"
+                                aria-label={`Disconnect ${account.alias || account.id} from ${card.label}`}
+                              >
+                                Disconnect
+                              </button>
+                            )}
                           </div>
                         );
                       })}
@@ -701,7 +771,7 @@ export function PluginsPanel() {
                         maxLength={64}
                         onChange={(event) => setAliasDraft(event.target.value)}
                         placeholder="Account label (work, personal…)"
-                        aria-label={`Label for another ${card.label} account`}
+                        aria-label={accounts.length > 0 ? `Label for another ${card.label} account` : `Label for the new ${card.label} account`}
                         className="min-w-0 flex-1 rounded-lg bg-raised px-3 py-2 text-[12px] text-ink placeholder:text-ink-secondary focus:outline-none focus:ring-1 focus:ring-accent"
                       />
                       <button
@@ -741,6 +811,10 @@ export function PluginsPanel() {
             </div>
           )}
         </div>
+          </>
+        ) : (
+          <McpServersPanel />
+        )}
       </div>
     </div>
   );

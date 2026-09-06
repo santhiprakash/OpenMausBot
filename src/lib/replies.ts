@@ -2,7 +2,10 @@ import type { Message } from "@/state/store";
 
 export function replySnippet(text: string, limit = 160): string {
   const clean = text
-    .replace(/<attached-image\s+path="[^"]*"\s*\/>/g, "[image]")
+    .replace(
+      /<attached-(image|file)\s+path="[^"]*"(?:\s+name="[^"]*")?\s*\/>/g,
+      (_tag, kind: "image" | "file") => kind === "image" ? "[image]" : "[file]",
+    )
     .replace(/\s+/g, " ")
     .trim();
   if (clean.length <= limit) return clean;

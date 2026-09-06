@@ -3,6 +3,7 @@
 // unavailable shadow, never crash the fleet. These tests pin that.
 import { describe, expect, it } from "vitest";
 
+import type { ModelCatalog } from "../contracts.ts";
 import { makeFakeDriver } from "../testing/fake-driver.ts";
 import { ProviderRegistry } from "./registry.ts";
 
@@ -49,6 +50,20 @@ describe("ProviderRegistry", () => {
     expect(described.untouched.access).toBe("subscription");
   });
 
+  it("resolves maintenance commands to the configured CLI or driver default", async () => {
+    const fake = makeFakeDriver();
+    fake.driver.defaultConfig = () => ({ cli: "fakebin" });
+    const registry = new ProviderRegistry([fake.driver]);
+    await registry.load({
+      defaulted: { driver: "fake" },
+      overridden: { driver: "fake", config: { cli: "/opt/fake/custom-bin" } },
+    });
+
+    expect(registry.cliTarget("defaulted")).toEqual({ driverKind: "fake", cli: "fakebin" });
+    expect(registry.cliTarget("overridden")).toEqual({ driverKind: "fake", cli: "/opt/fake/custom-bin" });
+    expect(registry.cliTarget("missing")).toBeNull();
+  });
+
   it("publishes custom-only access from driver metadata", async () => {
     const fake = makeFakeDriver();
     Object.assign(fake.driver.metadata, { access: "custom" });
@@ -68,6 +83,7 @@ describe("ProviderRegistry", () => {
     expect(described.snapshot.reason).toContain("from-the-future");
     expect(described.displayName).toBe("Tomorrow");
     expect(described.models.options).toHaveLength(0);
+    expect(registry.cliTarget("mystery")).toEqual({ driverKind: "from-the-future", cli: null });
   });
 
   it("downgrades a config-decode failure to a shadow with the error as reason", async () => {
@@ -131,6 +147,39 @@ describe("ProviderRegistry", () => {
     expect((await registry.describe())[0].capabilities.approvalReview).toBe(false);
     Object.assign(registry.get("a")!, { reviewPermission: async () => "ok" });
     expect((await registry.describe())[0].capabilities.approvalReview).toBe(true);
+  });
+
+  it("refreshes a live model catalog only on an explicit provider action", async () => {
+    const fake = makeFakeDriver();
+    const registry = new ProviderRegistry([fake.driver]);
+    await registry.load({ a: { driver: "fake" }, b: { driver: "fake" } });
+    const refreshes = { a: 0, b: 0 };
+    for (const instanceId of ["a", "b"] as const) {
+      const instance = registry.get(instanceId)!;
+      const models: ModelCatalog = { default: "", options: [] };
+      Object.assign(instance, {
+        models,
+        refreshModels: async () => {
+          refreshes[instanceId] += 1;
+          const id = `${instanceId}-${refreshes[instanceId]}`;
+          models.default = id;
+          models.options = [{ id, label: `Dynamic ${id}` }];
+        },
+      });
+    }
+
+    await registry.refreshModels("a");
+    await registry.refreshModels("b");
+    const first = Object.fromEntries((await registry.describe()).map((row) => [row.instanceId, row.models]));
+    expect(first.a.default).toBe("a-1");
+    expect(first.b.default).toBe("b-1");
+
+    await registry.refreshModels("a");
+    await registry.refreshModels("b");
+    const second = Object.fromEntries((await registry.describe()).map((row) => [row.instanceId, row.models]));
+    expect(second.a.default).toBe("a-2");
+    expect(second.b.default).toBe("b-2");
+    expect(refreshes).toEqual({ a: 2, b: 2 });
   });
 
   it("disposeAll disposes every live instance and empties the registry", async () => {

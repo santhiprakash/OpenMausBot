@@ -75,9 +75,21 @@ export function targetsForPreparation({
 }
 
 export function parsePrepareCloudflaredArgs(args = []) {
-  if (args.length === 0) return { current: false };
-  if (args.length === 1 && args[0] === "--current") return { current: true };
-  throw new Error("Usage: node scripts/prepare-cloudflared.mjs [--current]");
+  const options = { current: false };
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    const next = args[index + 1];
+    if (argument === "--current" && !options.current) {
+      options.current = true;
+    } else if (argument === "--root" && !options.root && typeof next === "string" && next !== "") {
+      // `openmausbot serve --tunnel` stages into its data dir, not a checkout.
+      options.root = next;
+      index += 1;
+    } else {
+      throw new Error("Usage: node scripts/prepare-cloudflared.mjs [--current] [--root DIR]");
+    }
+  }
+  return options;
 }
 
 export function sha256(value) {
@@ -262,11 +274,13 @@ async function stageTarget(root, target) {
       `${JSON.stringify(expectedManifest(target), null, 2)}\n`,
       { mode: 0o600 },
     );
-    rmSync(finalDirectory, { recursive: true, force: true });
+    rmSync(finalDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     renameSync(stagedDirectory, finalDirectory);
     console.log(`staged cloudflared ${CLOUDFLARED_VERSION} for ${target}`);
   } finally {
-    rmSync(scratch, { recursive: true, force: true });
+    // Windows Defender can briefly retain the executable after the version
+    // probe exits. Node retries EPERM for recursive removals when asked.
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 }
 

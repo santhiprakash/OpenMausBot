@@ -3,7 +3,7 @@ import type { JsonValue } from "../../server/schema.ts";
 
 export interface LocalVmWorkspaceBot {
   id: string;
-  computer?: "cloud" | "vm" | "local" | "off";
+  computer?: "cloud" | "vm" | "local" | "browser" | "off";
   hidden?: boolean;
 }
 
@@ -49,6 +49,36 @@ export interface NativeViewOverlayCandidate {
   explicit: boolean;
   visible: boolean;
   zIndex: number | null;
+}
+
+export interface NativeViewBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Fit a fixed-aspect native surface inside renderer-owned bounds. */
+export function aspectFitNativeViewBounds(
+  bounds: NativeViewBounds,
+  aspectRatio: number,
+): NativeViewBounds {
+  const widthFromHeight = Math.max(1, Math.floor(bounds.height * aspectRatio));
+  if (widthFromHeight <= bounds.width) {
+    return {
+      x: bounds.x + Math.floor((bounds.width - widthFromHeight) / 2),
+      y: bounds.y,
+      width: widthFromHeight,
+      height: bounds.height,
+    };
+  }
+  const heightFromWidth = Math.max(1, Math.floor(bounds.width / aspectRatio));
+  return {
+    x: bounds.x,
+    y: bounds.y + Math.floor((bounds.height - heightFromWidth) / 2),
+    width: bounds.width,
+    height: heightFromWidth,
+  };
 }
 
 /** Native views paint above renderer content. Hide them only when a visible,

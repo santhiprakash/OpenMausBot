@@ -81,6 +81,9 @@ function desktopCapabilities({
   packaged = false,
   localConnection = null,
   homeDir = require("node:os").homedir(),
+  // The page asking is a remote server's UI: this computer's screen, voice
+  // and local control are not on offer, whatever the host could do.
+  remote = false,
 } = {}) {
   const hostPlatform = normalizedPlatform(platform);
   const isMac = hostPlatform === "darwin";
@@ -141,7 +144,15 @@ function desktopCapabilities({
       (hostPlatform === "darwin" ? "cua-driver-unavailable" : "unsupported-platform");
   }
 
+  if (remote) {
+    const unavailable = { reasonCode: "remote-server" };
+    Object.assign(screenPreview, { available: false, interaction: "none" }, unavailable);
+    Object.assign(dictation, { available: false, engine: "none", onDevice: false }, unavailable);
+    Object.assign(localComputer, { available: false, support: "unsupported", enabled: false, status: "unavailable" }, unavailable);
+  }
+
   return {
+    remote: Boolean(remote),
     host: {
       platform: hostPlatform,
       label:
@@ -155,8 +166,9 @@ function desktopCapabilities({
       session: hostSession,
       packaged: Boolean(packaged),
       // so the renderer can show paths as ~/… without a Node builtin in
-      // the sandboxed preload
-      homeDir,
+      // the sandboxed preload; a remote server's page learns nothing about
+      // this computer's users
+      homeDir: remote ? "" : homeDir,
     },
     windowChrome: isMac ? "mac-inset" : "native",
     screenPreview,

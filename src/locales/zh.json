@@ -1,0 +1,18 @@
+{
+  "noEngines.title": "安装一个 AI 引擎，开始使用",
+  "noEngines.intro": "{app} 本身不自带模型——你的机器人依托这台电脑上已安装的 AI 命令行工具运行，使用你现有的登录。任选其一完成设置，机器人即可开始工作。",
+  "engines.cloud": "云端",
+  "engines.local": "本地",
+  "common.checkAgain": "重新检测",
+  "common.checking": "检测中…",
+  "approval.held.native": "提供商要求你批准此操作。",
+  "approval.held.sandbox": "这会更改提供商的沙箱，因此只有 Full access 才能自动批准。",
+  "approval.held.localComputer": "控制你的电脑从不包含在“始终允许”中，因此需要你来决定。",
+  "approval.held.unattended": "本轮由 webhook 或其他机器人发起，因此 Approve for me 已暂停，每个操作都会询问。",
+  "approval.held.unattendedFullAccess": "本轮由 webhook 或其他机器人发起，因此 Approve for me 已暂停，每个操作都会询问。 Full access 在无人值守时仍可继续工作。",
+  "approval.held.destructive": "这看起来具有破坏性，因此 Approve for me 停下来询问。",
+  "approval.held.sensitive": "这涉及凭据，因此 Approve for me 停下来询问。",
+  "approval.held.needsYou": "此操作需要你，因此 Approve for me 停下来询问。",
+  "approval.held.undeliveredFull": "Full access 无法送达此批准。",
+  "approval.held.undelivered": "Approve for me 无法回答此请求。"
+}

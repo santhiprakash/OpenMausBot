@@ -50,11 +50,12 @@ struct UpdatesSheet: View {
     }
 
     @ViewBuilder
-    private func section(_ title: String, tint: Color?, kind: ChatUpdate.Kind) -> some View {
+    private func section(_ title: LocalizedStringKey, tint: Color?, kind: ChatUpdate.Kind) -> some View {
         let items = updates.filter { $0.kind == kind }
         if !items.isEmpty {
             let color = kind == .needsYou ? MausPalette.color(items[0].chat.color) : Color.secondary
-            Text(title.uppercased())
+            Text(title)
+                .textCase(.uppercase)
                 .font(.system(size: 12, weight: .bold))
                 .tracking(0.5)
                 .foregroundStyle(color)
@@ -91,36 +92,43 @@ private struct UpdateRow: View {
                         .multilineTextAlignment(.leading)
 
                     if update.kind == .needsYou, let card = update.card, card.isPending {
-                        // The answers, as pills, exactly the options the card
-                        // offered — never a choice invented here.
-                        HStack(spacing: 8) {
-                            ForEach(card.options, id: \.self) { option in
-                                Button {
-                                    Haptics.selection()
-                                    answering = true
-                                    Task {
-                                        await session.answer(chat: update.chat, card: card, choice: option)
-                                        answering = false
-                                    }
-                                } label: {
-                                    Text(option)
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundStyle(CardStyle.isRefusal(option) ? Color.primary : .white)
-                                        .padding(.horizontal, 14)
-                                        .frame(height: 32)
-                                        .background(
-                                            Capsule().fill(
-                                                CardStyle.isRefusal(option)
-                                                    ? Color.secondary.opacity(0.18)
-                                                    : MausPalette.color(update.chat.color)
+                        if card.skillRequest != nil {
+                            Label("Open the chat to review SKILL.md", systemImage: "doc.text.magnifyingglass")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Color.secondary)
+                                .padding(.top, 6)
+                        } else {
+                            // The answers, as pills, exactly the options the card
+                            // offered — never a choice invented here.
+                            HStack(spacing: 8) {
+                                ForEach(card.options, id: \.self) { option in
+                                    Button {
+                                        Haptics.selection()
+                                        answering = true
+                                        Task {
+                                            await session.answer(chat: update.chat, card: card, choice: option)
+                                            answering = false
+                                        }
+                                    } label: {
+                                        Text(option)
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundStyle(CardStyle.isRefusal(option) ? Color.primary : .white)
+                                            .padding(.horizontal, 14)
+                                            .frame(height: 32)
+                                            .background(
+                                                Capsule().fill(
+                                                    CardStyle.isRefusal(option)
+                                                        ? Color.secondary.opacity(0.18)
+                                                        : MausPalette.color(update.chat.color)
+                                                )
                                             )
-                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(answering)
                                 }
-                                .buttonStyle(.plain)
-                                .disabled(answering)
                             }
+                            .padding(.top, 6)
                         }
-                        .padding(.top, 6)
                     }
                 }
 

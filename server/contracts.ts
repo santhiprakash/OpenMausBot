@@ -5,6 +5,8 @@
 // Stream. The shapes and names are kept so the two codebases stay mutually
 // readable.
 
+import type { ApprovalMode } from "../shared/approval-mode.ts";
+
 export type DriverKind = string;
 export type InstanceId = string;
 export type ThreadId = string;
@@ -47,6 +49,15 @@ export interface ModelSelection {
   model: string;
   /** Optional: no effort means no flag, and the CLI keeps its own default. */
   effort?: EffortLevel;
+}
+
+/** An image already admitted to OpenMausBot's private attachment store.
+ * Drivers receive this structured value instead of learning a host path from
+ * prompt text. The harness validates the path and size before constructing it. */
+export interface TurnImageInput {
+  path: string;
+  mime: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+  bytes: number;
 }
 
 // ── instance configuration envelope ────────────────────────────────────
@@ -110,6 +121,11 @@ export type RuntimeEvent = RuntimeEventBase &
     | { type: "item.updated"; itemType: "tool" | "reasoning"; tokens?: number | null }
     | { type: "item.completed"; itemType: "tool"; ok: boolean }
     | { type: "item.completed"; itemType: "assistant_text"; text: string }
+    /** Provider-generated raster bytes. This event is folded into the
+     * private attachment store and is never forwarded to renderer SSE: a
+     * multi-megabyte base64 result belongs in one durable message URL, not
+     * duplicated through every connected window. */
+    | { type: "item.completed"; itemType: "assistant_image"; data: string; alt?: string }
     | { type: "content.delta"; streamKind: "assistant_text" | "reasoning_text"; delta: string }
     | {
         type: "request.opened";
@@ -118,6 +134,9 @@ export type RuntimeEvent = RuntimeEventBase &
         summary: string;
         choices?: string[];
         approvalScope?: "local-computer";
+        /** Provider asks to widen its configured sandbox. Only explicit Full
+         * access may answer this automatically; Auto/remembered grants may not. */
+        requiresExplicitApproval?: boolean;
       }
     | {
         type: "request.resolved";
@@ -150,6 +169,13 @@ export type RequestOutcome = "allowed-once" | "rejected" | "answered" | "unavail
 export interface SendTurnInput {
   threadId: ThreadId;
   text: string;
+  /** Per-bot approval policy, reasserted by providers on every turn so a
+   * resumed native session cannot retain a stale, more permissive mode. */
+  approvalMode?: ApprovalMode;
+  /** Images attached to this user turn only. They are deliberately kept out
+   * of replay transcripts: the provider's native session owns earlier image
+   * context, while a fresh replay retains the visible attachment marker. */
+  images?: TurnImageInput[];
   model?: string;
   effort?: EffortLevel;
   resumeCursor?: unknown;
@@ -198,6 +224,10 @@ export interface SendTurnInput {
     /** dweb network daemon: an MCP proxy exposing dweb status, repo, and
      * opencode model access as tools. url is the dweb HTTP base. */
     dweb?: { url: string };
+    /** User-configured MCP servers (config.json `mcpServers`), already
+     * validated and normalized by customMcpServers(). Mounted WITHOUT any
+     * pre-allow: their tools ride each driver's normal permission flow. */
+    custom?: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   };
   cwd?: string;
 }
@@ -233,6 +263,10 @@ export interface ProviderAdapter {
      * attachment an engine cannot open (a bot told it has an image it
      * cannot read burns the turn). */
     images?: boolean;
+    /** True only when sendTurn consumes `images` as structured provider
+     * input. Image-capable legacy drivers may instead read the attachment
+     * path kept in `text`; central dispatch strips that tag only here. */
+    nativeImageInput?: boolean;
     /** Effort levels this driver can pass to its CLI, ascending. Absent =
      * the driver cannot set effort, so the app never offers the control —
      * same rule as computerMcp: never show a knob the driver cannot turn. */
@@ -246,6 +280,10 @@ export interface ProviderAdapter {
     /** True only when local MCP calls can reach the human approval channel.
      * Full-auto/bypass provider instances must leave this false. */
     localComputerMcp?: boolean;
+    /** True when the driver mounts turn.integrations.custom (the user's own
+     * MCP servers from config). Same rule as composioMcp: an entry in the
+     * config says the servers exist, not that this engine can reach them. */
+    customMcp?: boolean;
   };
   sendTurn(input: SendTurnInput): Promise<TurnStartResult>;
   interruptTurn(threadId: ThreadId, turnId?: TurnId): Promise<void>;
@@ -274,6 +312,13 @@ export interface ProviderSnapshot {
   reason?: string;
   authenticated?: boolean;
   version?: string | null;
+  /** A non-blocking provider update that unlocks newer capabilities. The
+   * engine remains usable; renderer surfaces the exact terminal command. */
+  update?: {
+    title: string;
+    message: string;
+    command: string;
+  };
   /** How this instance is paid for, when the driver can tell: a reported
    * cost on a subscription is notional and the UI labels it as such. */
   billing?: "metered" | "subscription";
@@ -299,6 +344,18 @@ export interface EngineInstall {
   signInCommand?: string;
   /** `command` needs npm on PATH, so the UI can say so when Node is absent. */
   needsNode?: boolean;
+  /** The app downloads and verifies a pinned provider runtime itself. */
+  managed?: {
+    label: string;
+    downloadBytes: number;
+  };
+}
+
+export interface ProviderAuthenticationStart {
+  phase: "waiting" | "succeeded";
+  flowId: string | null;
+  authorizationUrl: string | null;
+  expiresAt: string | null;
 }
 
 // ── driver SPI (upstream ProviderDriver — a plain record, not a service) ─
@@ -312,6 +369,10 @@ export interface ModelCatalog {
     label: string;
     custom?: boolean;
     loaded?: boolean;
+    /** upstream provider id (e.g. "zai", "nous") when the engine can report
+     * it — the picker shows it as a muted badge so BYOK duplicates of the
+     * same model id stay distinguishable. */
+    provider?: string;
     /** total context window in tokens, when the driver knows it — sizes
      * the model-facing rebuild (server/context-rebuild.ts). Unknown falls
      * back to a pattern table over the model id, then a conservative default. */
@@ -335,6 +396,11 @@ export interface ProviderInstance {
   readonly models: ModelCatalog;
   /** Refresh a live catalog without recreating the provider instance. */
   readonly refreshModels?: () => Promise<void>;
+  /** Optional first-party runtime installation and account setup. */
+  readonly installRuntime?: () => Promise<void>;
+  readonly startAuthentication?: () => Promise<ProviderAuthenticationStart>;
+  readonly completeAuthentication?: (flowId: string, callbackUrl: string) => Promise<void>;
+  readonly cancelAuthentication?: () => Promise<void>;
   readonly adapter: ProviderAdapter;
   snapshot(): Promise<ProviderSnapshot>;
   /** Cheap one-shot text call (upstream TextGeneration) — titles, summaries. */

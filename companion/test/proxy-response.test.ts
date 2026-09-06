@@ -7,7 +7,7 @@
 import { createServer, type Server, type ServerResponse } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { createProxyHandler } from "../src/proxy.ts";
+import { createProxyHandler, proxyHeadersTimeoutMs } from "../src/proxy.ts";
 import type { CompanionEndpoint } from "../src/endpoints.ts";
 import { scrub } from "../src/wire.ts";
 
@@ -26,6 +26,7 @@ let sidecar: Server;
 let sidecarPort = 0;
 let cloudDesktopAccess = true;
 let companionMarker = "";
+let companionDevice = "";
 let endpointCandidates: CompanionEndpoint[] = [];
 /** What the stub harness answers with next. Set per test. */
 let respond: (res: ServerResponse) => void = (res) => res.end();
@@ -40,17 +41,23 @@ const close = (server: Server | undefined): Promise<void> =>
 const device = async (
   path = "/api/bots",
   method = "GET",
+  body?: string,
 ): Promise<{ status: number; text: string; headers: Headers }> => {
-  const res = await fetch(`http://127.0.0.1:${sidecarPort}${path}`, {
-    method,
-    headers: { authorization: `Bearer ${TOKEN}` },
-  });
+  const headers = {
+    authorization: `Bearer ${TOKEN}`,
+    ...(body === undefined ? {} : { "content-type": "application/json" }),
+  };
+  const init: RequestInit = body === undefined
+    ? { method, headers }
+    : { method: "POST", headers, body };
+  const res = await fetch(`http://127.0.0.1:${sidecarPort}${path}`, init);
   return { status: res.status, text: await res.text(), headers: res.headers };
 };
 
 beforeAll(async () => {
   harness = createServer((req, res) => {
     companionMarker = String(req.headers["x-openmausbot-companion"] ?? "");
+    companionDevice = String(req.headers["x-openmausbot-companion-device"] ?? "");
     respond(res);
   });
   const harnessPort = await listen(harness);
@@ -58,7 +65,7 @@ beforeAll(async () => {
   sidecar = createServer(
     createProxyHandler({
       harnessPort,
-      authenticate: (t) => (t === TOKEN ? { cloudDesktopAccess } : null),
+      authenticate: (t) => (t === TOKEN ? { id: "phone-1", cloudDesktopAccess } : null),
       redeem: () => ({ error: "not used here" }),
       serverName: () => "Test computer",
       endpoints: () => endpointCandidates,
@@ -73,6 +80,12 @@ afterAll(async () => {
 });
 
 describe("preparing a harness response for a device", () => {
+  it("gives only transactional phone credential saves the longer deadline", () => {
+    expect(proxyHeadersTimeoutMs("/api/bots/b1/secret-cards/m1/provide")).toBe(105_000);
+    expect(proxyHeadersTimeoutMs("/api/bots/b1/messages")).toBe(30_000);
+    expect(proxyHeadersTimeoutMs("/api/bots/b1/secret-cards/m1/provide", 17)).toBe(17);
+  });
+
   it("drops an endpoint whose runtime URL is not a string", async () => {
     const malformed: CompanionEndpoint = { kind: "hosted", priority: 0, url: "https://ok.example" };
     Object.defineProperty(malformed, "url", { value: 42 });
@@ -86,13 +99,15 @@ describe("preparing a harness response for a device", () => {
     }
   });
 
-  it("requires the Mac to enable cloud desktop for this phone", async () => {
+  it("requires the host to enable cloud desktop for viewer and preview requests", async () => {
     cloudDesktopAccess = false;
     try {
-      const { status, text } = await device("/api/bots/b1/computer/join", "POST");
-      expect(status).toBe(403);
-      expect(text).toContain("enable it in OpenMausBot");
-      expect(text).toContain("Settings → Phone");
+      for (const action of ["join", "screenshot"]) {
+        const { status, text } = await device(`/api/bots/b1/computer/${action}`, "POST");
+        expect(status).toBe(403);
+        expect(text).toContain("enable it in OpenMausBot");
+        expect(text).toContain("Settings → Remote access");
+      }
     } finally {
       cloudDesktopAccess = true;
     }
@@ -107,6 +122,39 @@ describe("preparing a harness response for a device", () => {
     expect(status).toBe(200);
     expect(JSON.parse(text).joinUrl).toBe("https://desktop.example/session/fresh");
     expect(companionMarker).toBe("1");
+    expect(companionDevice).toBe("phone-1");
+  });
+
+  it("replaces a caller-supplied device identity with the authenticated one", async () => {
+    respond = (res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{}");
+    };
+    const response = await fetch(`http://127.0.0.1:${sidecarPort}/api/bots`, {
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        "x-openmausbot-companion-device": "another-phone",
+      },
+    });
+    expect(response.status).toBe(200);
+    expect(companionDevice).toBe("phone-1");
+  });
+
+  it("turns a host-loopback VPS viewer into a device-scoped companion path", async () => {
+    respond = (res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        joinUrl: "http://127.0.0.1:45678/vnc.html#autoconnect=true&password=viewer-secret",
+        state: "running",
+      }));
+    };
+    const { status, text } = await device("/api/bots/b1/computer/join", "POST");
+    expect(status).toBe(200);
+    const joinUrl = String(JSON.parse(text).joinUrl);
+    expect(joinUrl).toMatch(/^\/vps-viewer\/[A-Za-z0-9_-]{32}\/vnc\.html#/);
+    expect(joinUrl).toContain("password=viewer-secret");
+    expect(joinUrl).toContain("path=vps-viewer%2F");
+    expect(joinUrl).not.toContain("127.0.0.1:45678");
   });
 
   it("never forwards a body it could not scrub", async () => {
@@ -199,5 +247,48 @@ describe("preparing a harness response for a device", () => {
     expect(response.text).toBe("image-bytes");
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(response.headers.get("cdn-cache-control")).toBe("no-store");
+  });
+
+  it("passes an application/json message file through byte-for-byte", async () => {
+    const bytes = '{\n  "resumeCursors": { "this-is-file-content": true },\n  "n": 1\n}\n';
+    respond = (res) => {
+      res.writeHead(200, {
+        "content-type": "application/json",
+        "content-disposition": 'attachment; filename="report.json"',
+      });
+      res.end(bytes);
+    };
+
+    const response = await device(
+      "/api/threads/thread-1/messages/message-1/file",
+      "POST",
+      JSON.stringify({ path: "report.json" }),
+    );
+    expect(response.status).toBe(200);
+    expect(response.text).toBe(bytes);
+    expect(response.headers.get("content-disposition")).toContain("report.json");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  it("relays generated speech to a paired desktop byte for byte", async () => {
+    const audio = Uint8Array.from([0x49, 0x44, 0x33, 0x00, 0xff, 0x17]);
+    respond = (res) => {
+      res.writeHead(200, {
+        "content-type": "audio/mpeg",
+        "content-length": String(audio.byteLength),
+        "cache-control": "public, max-age=86400",
+      });
+      res.end(audio);
+    };
+
+    const response = await fetch(`http://127.0.0.1:${sidecarPort}/api/tts/speak`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ text: "Hello from the agent" }),
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("audio/mpeg");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(audio);
   });
 });

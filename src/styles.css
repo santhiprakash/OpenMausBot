@@ -23,10 +23,12 @@
    ───────────────────────────────────────────────────────────────────────── */
 @theme {
   --animate-panel-in: panel-in 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+  --animate-workspace-in: workspace-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
   --animate-pop-in: pop-in 0.2s cubic-bezier(0.22, 1, 0.36, 1);
   --animate-caret: caret-blink 1s step-end infinite;
   --animate-msg-in: msg-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
   --animate-shimmer: shimmer 2s linear infinite;
+  --animate-status-pulse: status-pulse 1.6s steps(2, jump-none) infinite;
 
   /* Defaults = Midnight. Kept here so the app is never unstyled. */
   --color-app: #070707;
@@ -60,10 +62,12 @@
 /* Tokens that no utility generates — declared outside `@theme` so Tailwind
    can't tree-shake them away, and so a skin can redefine them freely. */
 :root {
+  --code-color-scheme: dark;
   /* ink carried by a filled accent / danger surface (see the rule at the
      bottom of this file, which is what makes them take effect) */
   --color-accent-ink: #ffffff;
   --color-danger-ink: #ffffff;
+  --color-success-ink: #072114;
   --color-scrollbar: #3d3d3d;
   /* second speed line of the mascot — contrasts against the app ground */
   --color-maus-line: #fcfcfc;
@@ -80,6 +84,7 @@
    they carry. Atelier and Foundry fix this via --color-accent-ink.
    ───────────────────────────────────────────────────────────────────────── */
 [data-skin="midnight"] {
+  --code-color-scheme: dark;
   --color-app: #070707;
   --color-panel: #111111;
   --color-raised: #2f2f2f;
@@ -98,6 +103,7 @@
   --color-success: #38d591;
   --color-danger: #ff5667;
   --color-danger-ink: #ffffff;
+  --color-success-ink: #072114;
   --color-warning: #ff9800;
   --color-scrollbar: #3d3d3d;
   --color-maus-line: #fcfcfc;
@@ -118,6 +124,7 @@
    value is named next to each, so the drift stays auditable.
    ───────────────────────────────────────────────────────────────────────── */
 [data-skin="atelier"] {
+  --code-color-scheme: light;
   --color-app: #f5f1eb;           /* outermost ground */
   --color-panel: #fbf8f2;         /* sidebar */
   --color-raised: #ffffff;        /* content — raised means lighter here */
@@ -143,6 +150,7 @@
   --color-success: #3f6b47;
   --color-danger: #a33a32;
   --color-danger-ink: #ffffff;
+  --color-success-ink: #ffffff;
   --color-warning: #7a5f31;       /* darkened → 4.98:1 */
   --color-scrollbar: #c9c0ae;
   --color-maus-line: #6b6559;
@@ -172,6 +180,7 @@
    8px — because sheet metal doesn't round the way paper does.
    ───────────────────────────────────────────────────────────────────────── */
 [data-skin="foundry"] {
+  --code-color-scheme: dark;
   --color-app: #100e0b;           /* deepest ground, warm black */
   --color-panel: #171410;         /* sidebar */
   --color-raised: #262019;        /* raised means warmer, not just lighter */
@@ -195,6 +204,7 @@
   --color-success: #57b078;
   --color-danger: #e0685e;        /* a lamp, not a paint chip */
   --color-danger-ink: #1c0d0b;
+  --color-success-ink: #1c150c;
   --color-warning: #dfa441;
   --color-scrollbar: #3d3529;
   --color-maus-line: #b0a696;
@@ -220,6 +230,7 @@
    round more than paper does, and far more than sheet metal.
    ───────────────────────────────────────────────────────────────────────── */
 [data-skin="lagoon"] {
+  --code-color-scheme: light;
   /* The tint is the point, so it is carried by the surfaces, not by a button:
      the ground sits 13 points of green-blue above its red channel, roughly
      three times Atelier's cream cast, which is what makes the skin read as
@@ -253,6 +264,7 @@
   --color-success: #2f6b4f;
   --color-danger: #a8382f;
   --color-danger-ink: #ffffff;
+  --color-success-ink: #ffffff;
   --color-warning: #7a5a2a;
   --color-scrollbar: #a6b8b6;
   --color-maus-line: #4d5c5b;
@@ -261,6 +273,131 @@
     Roboto, sans-serif;
   --radius-lg: 8px;
   --radius-xl: 14px;
+}
+
+/* ── Graphite ─────────────────────────────────────────────────────────────
+   Neutral charcoal for people who want a dark workspace without Midnight's
+   near-black contrast or Foundry's warmth. Steel blue stays deliberately
+   desaturated: it marks actions and focus without making the chrome glow.
+   ───────────────────────────────────────────────────────────────────────── */
+[data-skin="graphite"] {
+  --code-color-scheme: dark;
+  --color-app: #111214;
+  --color-panel: #181a1d;
+  --color-raised: #2a2d32;
+  --color-raised-hover: #353941;
+  --color-card: #22252a;
+  --color-inset: #0d0e10;
+  --color-control: #2a2d32;
+  --color-hairline: #3b4048;
+
+  --color-ink: #f2f4f7;
+  --color-ink-secondary: #b3b8c2;
+
+  --color-accent: #4f75a2;
+  --color-accent-border: #698fbb;
+  --color-accent-text: #8fb4df;
+  --color-focus: #8fb4df;
+  --color-accent-ink: #ffffff;
+  --color-bubble-user: #30343a;
+
+  --color-success: #63b58a;
+  --color-danger: #dd6b73;
+  --color-danger-ink: #1e0b0e;
+  --color-success-ink: #101a14;
+  --color-warning: #d3a150;
+  --color-scrollbar: #464b54;
+  --color-maus-line: #b3b8c2;
+
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Segoe UI", system-ui, sans-serif;
+  --radius-lg: 6px;
+  --radius-xl: 10px;
+}
+
+/* ── Linen ────────────────────────────────────────────────────────────────
+   A neutral daylight skin: less cream than Atelier and less blue-green than
+   Lagoon. Navy is used as ink rather than decoration, keeping the workspace
+   crisp and familiar instead of colourful.
+   ───────────────────────────────────────────────────────────────────────── */
+[data-skin="linen"] {
+  --code-color-scheme: light;
+  --color-app: #eceff3;
+  --color-panel: #f5f6f8;
+  --color-raised: #ffffff;
+  --color-raised-hover: #e1e6ed;
+  --color-card: #ffffff;
+  --color-inset: #e6e9ee;
+  --color-control: #d3d9e1;
+  --color-hairline: #b4bbc5;
+
+  --color-ink: #1d2229;
+  --color-ink-secondary: #59616c;
+
+  --color-accent: #355f8a;
+  --color-accent-border: #4978a6;
+  --color-accent-text: #2c5680;
+  --color-focus: #2c5680;
+  --color-accent-ink: #ffffff;
+  --color-bubble-user: #e1e6ed;
+
+  --color-success: #2f704f;
+  --color-danger: #a83d48;
+  --color-danger-ink: #ffffff;
+  --color-success-ink: #ffffff;
+  --color-warning: #765b2b;
+  --color-scrollbar: #aeb6c0;
+  --color-maus-line: #59616c;
+
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, sans-serif;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+}
+
+/* ── Dusk ─────────────────────────────────────────────────────────────────
+   A restrained plum-dark alternative. The violet lives in the neutrals as
+   much as the accent, so the skin feels cohesive rather than neon or themed.
+   ───────────────────────────────────────────────────────────────────────── */
+[data-skin="dusk"] {
+  --code-color-scheme: dark;
+  --color-app: #121014;
+  --color-panel: #19161c;
+  --color-raised: #2b2630;
+  --color-raised-hover: #37303d;
+  --color-card: #231f27;
+  --color-inset: #0d0b0f;
+  --color-control: #2b2630;
+  --color-hairline: #403847;
+
+  --color-ink: #f4eff6;
+  --color-ink-secondary: #b9afbd;
+
+  --color-accent: #765683;
+  --color-accent-border: #9670a3;
+  --color-accent-text: #c49bd2;
+  --color-focus: #c49bd2;
+  --color-accent-ink: #ffffff;
+  --color-bubble-user: #332b38;
+
+  --color-success: #6fad83;
+  --color-danger: #db727a;
+  --color-danger-ink: #210c10;
+  --color-success-ink: #101812;
+  --color-warning: #d0a35d;
+  --color-scrollbar: #4a414f;
+  --color-maus-line: #b9afbd;
+
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Segoe UI", system-ui, sans-serif;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+}
+
+/* Shiki emits both palettes so cached blocks follow the nearest skin without
+   re-tokenizing. Scope the scheme to code; native controls keep their styling. */
+.chat-md .shiki {
+  color-scheme: var(--code-color-scheme);
 }
 
 html,
@@ -322,6 +459,10 @@ body {
   from { transform: translateX(28px); opacity: 0; }
   to { transform: translateX(0); opacity: 1; }
 }
+@keyframes workspace-in {
+  from { opacity: 0.92; }
+  to { opacity: 1; }
+}
 @keyframes pop-in {
   from { transform: scale(0.96) translateY(6px); opacity: 0; }
   to { transform: scale(1) translateY(0); opacity: 1; }
@@ -368,10 +509,6 @@ body {
   transform-origin: 18px 100%;
   animation: turn-answer-in 0.48s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
-/* last line of text → mascot ≈ 5mm (bubble py-2.5 already contributes 10px) */
-.turn-mascot-tight {
-  margin-top: max(0px, calc(5mm - 10px));
-}
 /* "Thinking…" label sheen while the model reasons */
 @keyframes shimmer {
   from { background-position: 200% 50%; }
@@ -380,6 +517,14 @@ body {
 @keyframes reduced-loader-pulse {
   0%, 100% { opacity: 0.45; }
   50% { opacity: 1; }
+}
+/* Long-lived activity dots: steps() + holds draw a handful of compositor
+   frames per cycle instead of one per vsync. Indicators that run for
+   minutes must not continuously repaint; stagger via animation-delay. */
+@keyframes status-pulse {
+  0%, 100% { opacity: 0.25; }
+  30% { opacity: 1; }
+  60% { opacity: 0.25; }
 }
 .thinking-shimmer {
   background: linear-gradient(90deg, var(--color-ink-secondary) 40%, var(--color-ink) 50%, var(--color-ink-secondary) 60%);
@@ -390,6 +535,7 @@ body {
 }
 @media (prefers-reduced-motion: reduce) {
   .animate-caret, .animate-msg-in, .animate-shimmer { animation: none; }
+  .animate-status-pulse { animation: none; opacity: 0.6; }
   .thinking-shimmer { background: none; color: var(--color-ink-secondary); }
   .turn-mascot-in, .turn-mascot-out, .turn-answer { animation: none; }
   /* The drawer still moves, it just arrives instantly. */
@@ -880,7 +1026,7 @@ body {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
-   Filled accent / danger surfaces
+   Filled accent / danger / success surfaces
 
    Components hardcode `text-white` on these fills (~20 call sites). That works
    only as long as every skin's accent is dark enough to carry white — which
@@ -895,6 +1041,9 @@ body {
 .bg-danger {
   color: var(--color-danger-ink);
 }
+.bg-success {
+  color: var(--color-success-ink);
+}
 
 /* Disabled buttons.
    Upstream fades them with `disabled:opacity-40`. On a dark ground that holds:
@@ -907,4 +1056,13 @@ button:disabled.bg-danger {
   background-color: var(--color-raised-hover);
   color: var(--color-ink-secondary);
   opacity: 1;
+}
+
+/* Sidebar items are clickable and should say so on hover. Tailwind v4's
+   preflight stopped giving buttons a pointer cursor, so bot rows, section
+   headers, and menu entries hovered like static text. Scoped to the sidebar
+   (and its portalled context menu) rather than every button in the app;
+   disabled or busy controls keep the default cursor. */
+[data-sidebar] :is(button, [role="button"]):not(:disabled, [aria-busy="true"]) {
+  cursor: pointer;
 }

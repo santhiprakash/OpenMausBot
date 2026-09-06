@@ -19,8 +19,9 @@ describe("credentials", () => {
     expect(ask("POST", "/api/pair", false)).toBeNull();
     expect(ask("GET", "/api/bots", false)).toEqual({
       status: 401,
-      error: "pair this device from Phone settings in OpenMausBot on your computer",
+      error: "pair this device from Remote access settings on the host computer",
     });
+    expect(ask("POST", "/api/files", false)?.status).toBe(401);
   });
 
   it("lets anyone curl liveness — it is the unauthenticated smoke test", () => {
@@ -39,23 +40,36 @@ describe("what the app may do", () => {
     ["GET", "/api/config"],
     ["GET", "/api/events"],
     ["GET", "/api/instances"],
+    ["GET", "/api/team-map"],
     ["GET", "/api/companion/endpoints"],
     ["GET", "/api/bots"],
     ["POST", "/api/bots"],
+    ["POST", "/api/sidebar-sections"],
     ["POST", "/api/bots/bot_123/messages"],
+    ["PATCH", "/api/bots/bot_123/cards/msg_2"],
+    ["POST", "/api/bots/bot_123/respond"],
     ["POST", "/api/bots/bot_123/interrupt"],
+    ["DELETE", "/api/bots/bot_123/queue/queue_1"],
     ["POST", "/api/bots/bot_123/read"],
     ["POST", "/api/bots/bot_123/always-allow"],
     ["POST", "/api/bots/bot_123/messages/msg_2/edit"],
+    ["GET", "/api/bots/bot_123/overview"],
     ["POST", "/api/bots/bot_123/active-branch"],
     ["POST", "/api/bots/bot_123/tasks"],
     ["POST", "/api/bots/bot_123/tasks/th_1"],
     ["PATCH", "/api/bots/bot_123/tasks/th_1"],
     ["DELETE", "/api/bots/bot_123/tasks/th_1"],
     ["PATCH", "/api/bots/bot_123/profile"],
+    ["PATCH", "/api/bots/bot_123/model"],
     ["POST", "/api/bots/bot_123/avatar/generate"],
     ["POST", "/api/bots/bot_123/computer/join"],
+    ["POST", "/api/bots/bot_123/secret-cards/message_1/provide"],
+    ["POST", "/api/bots/bot_123/computer/control"],
+    ["POST", "/api/bots/bot_123/computer/screenshot"],
+    ["POST", "/api/bots/bot_123/computer/viewer-close"],
     ["POST", "/api/groups/room-1/messages"],
+    ["POST", "/api/groups/room-1/interrupt"],
+    ["DELETE", "/api/groups/room-1/queue/queue_1"],
     ["POST", "/api/groups/room-1/read"],
     ["POST", "/api/groups/room-1/tasks"],
     ["POST", "/api/groups/room-1/tasks/th_1"],
@@ -63,23 +77,34 @@ describe("what the app may do", () => {
     ["DELETE", "/api/groups/room-1/tasks/th_1"],
     ["GET", "/api/threads/th_1/messages"],
     ["GET", "/api/threads/th_1/messages/msg_2/image"],
+    ["POST", "/api/threads/th_1/messages/msg_2/file"],
     ["POST", "/api/threads/th_1/messages/msg_2/reactions"],
     ["GET", "/api/threads/th_1/export"],
     ["POST", "/api/threads/th_1/respond"],
     ["GET", "/api/search"],
     ["POST", "/api/attachments"],
     ["GET", "/api/attachments/avatar-123.webp"],
+    ["POST", "/api/files"],
     ["GET", "/api/tts/voices"],
+    ["POST", "/api/tts/prepare"],
     ["POST", "/api/tts/speak"],
     ["GET", "/api/routines"],
     ["POST", "/api/routines"],
     ["PATCH", "/api/routines/routine_1"],
     ["DELETE", "/api/routines/routine_1"],
     ["POST", "/api/routines/routine_1/run"],
+    ["POST", "/api/routine-runs/run_1/cancel"],
+    ["POST", "/api/routine-runs/run_1/seen"],
     ["GET", "/api/connectors/catalog"],
     ["GET", "/api/connectors/connected"],
     ["GET", "/api/connectors"],
     ["POST", "/api/connectors/slack/authorize"],
+    ["GET", "/api/bots/bot_123/connector-cards/msg_2/status"],
+    ["POST", "/api/bots/bot_123/connector-cards/msg_2/authorize"],
+    ["POST", "/api/bots/bot_123/connector-cards/msg_2/resume"],
+    ["POST", "/api/bots/bot_123/connector-cards/msg_2/dismiss"],
+    ["POST", "/api/bots/bot_123/secret-cards/msg_2/resume"],
+    ["POST", "/api/bots/bot_123/secret-cards/msg_2/dismiss"],
   ];
 
   for (const [method, path] of calls) {
@@ -102,15 +127,15 @@ describe("what it may not", () => {
     ] as Array<[string, string]>) {
       const denial = ask(method, path);
       expect(denial?.status, `${method} ${path}`).toBe(403);
-      expect(denial?.error, `${method} ${path}`).toMatch(/on your computer/);
+      expect(denial?.error, `${method} ${path}`).toMatch(/on (?:your|the host) computer/);
     }
     expect(ask("GET", "/api/devices")).toEqual({
       status: 403,
-      error: "Phone settings are managed on your computer",
+      error: "Remote access settings are managed on the host computer",
     });
     expect(ask("GET", "/api/companion")).toEqual({
       status: 403,
-      error: "Phone settings are managed on your computer",
+      error: "Remote access settings are managed on the host computer",
     });
   });
 
@@ -147,13 +172,24 @@ describe("what it may not", () => {
     expect(ask("GET", "/index.html")?.status).toBe(404);
   });
 
-  it("opens only a fresh cloud viewer, not the cloud computer control API", () => {
+  it("opens and previews only an explicitly granted cloud viewer", () => {
     expect(allowed("POST", "/api/bots/bot_123/computer/join")).toBe(true);
+    expect(allowed("POST", "/api/bots/bot_123/computer/control")).toBe(true);
+    expect(allowed("POST", "/api/bots/bot_123/computer/screenshot")).toBe(true);
+    expect(allowed("POST", "/api/bots/bot_123/computer/viewer-close")).toBe(true);
     expect(allowed("GET", "/api/bots/bot_123/computer")).toBe(false);
+    expect(allowed("GET", "/api/bots/bot_123/computer/control")).toBe(false);
+    expect(allowed("GET", "/api/bots/bot_123/computer/viewer-close")).toBe(false);
     expect(allowed("POST", "/api/bots/bot_123/computer/provision")).toBe(false);
     expect(allowed("POST", "/api/bots/bot_123/computer/sleep")).toBe(false);
     expect(allowed("POST", "/api/bots/bot_123/computer/exec")).toBe(false);
-    expect(allowed("POST", "/api/bots/bot_123/computer/screenshot")).toBe(false);
+  });
+
+  it("allows only the exact encrypted credential submission verb", () => {
+    expect(allowed("POST", "/api/bots/bot_123/secret-cards/message_1/provide")).toBe(true);
+    expect(allowed("GET", "/api/bots/bot_123/secret-cards/message_1/provide")).toBe(false);
+    expect(allowed("POST", "/api/bots/bot_123/secret-cards/message_1/provided")).toBe(false);
+    expect(allowed("POST", "/api/bots/bot_123/secret-cards/message_1/provide/extra")).toBe(false);
   });
 
   // The method is part of the allowance, not decoration: reading the fleet
@@ -162,17 +198,31 @@ describe("what it may not", () => {
     expect(allowed("GET", "/api/bots")).toBe(true);
     expect(allowed("DELETE", "/api/bots/bot_123")).toBe(false);
     expect(allowed("POST", "/api/threads/th_1/messages")).toBe(false);
+    expect(allowed("GET", "/api/threads/th_1/messages/msg_2/file")).toBe(false);
+    expect(allowed("POST", "/api/threads/th_1/messages/msg_2/file/extra")).toBe(false);
     expect(allowed("GET", "/api/groups/room-1")).toBe(false);
     expect(allowed("PATCH", "/api/bots/bot_123")).toBe(false);
+    expect(allowed("GET", "/api/bots/bot_123/model")).toBe(false);
+    expect(allowed("POST", "/api/bots/bot_123/model")).toBe(false);
+    expect(allowed("PATCH", "/api/bots/bot_123/model/extra")).toBe(false);
+    expect(allowed("POST", "/api/bots/bot_123/overview")).toBe(false);
+    expect(allowed("GET", "/api/bots/bot_123/overview/extra")).toBe(false);
     expect(allowed("PATCH", "/api/bots/bot_123/profile/execution-policy")).toBe(false);
+    expect(allowed("GET", "/api/sidebar-sections")).toBe(false);
+    expect(allowed("PATCH", "/api/sidebar-sections")).toBe(false);
+    expect(allowed("POST", "/api/sidebar-sections/extra")).toBe(false);
     expect(allowed("PUT", "/api/config")).toBe(false);
     expect(allowed("GET", "/api/attachments/../config.json")).toBe(false);
-    expect(allowed("POST", "/api/routine-runs/run_1/cancel")).toBe(false);
+    expect(allowed("GET", "/api/files")).toBe(false);
+    expect(allowed("POST", "/api/files/anything")).toBe(false);
+    expect(allowed("GET", "/api/routine-runs/run_1/cancel")).toBe(false);
+    expect(allowed("POST", "/api/routine-runs/run_1/retry")).toBe(false);
     expect(allowed("DELETE", "/api/connectors/slack")).toBe(false);
     expect(allowed("GET", "/api/connectors/connected/all")).toBe(false);
-    // revocation is a Mac-only affordance: the phone can list and add
+    // revocation is a host-only affordance: a paired client can list and add
     // accounts but the account DELETE route is deliberately not allowed
     expect(allowed("DELETE", "/api/connectors/slack/accounts/ca_123")).toBe(false);
+    expect(allowed("POST", "/api/bots/bot_123/secret-cards/msg_2/provided")).toBe(false);
     expect(allowed("PATCH", "/api/groups/room-1")).toBe(false);
   });
 

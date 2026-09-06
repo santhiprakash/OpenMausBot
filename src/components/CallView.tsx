@@ -23,10 +23,11 @@ import { Loader2, Phone, PhoneOff, X } from "lucide-react";
 import { useStore, visibleMessages, type Bot } from "@/state/store";
 import { currentCall, deferCallCleanup, endCall, startCall, useOnCall } from "@/lib/call";
 import { speaker } from "@/lib/tts";
+import { localSystemVoiceActive } from "@/lib/local-voice";
 import { useSpeech } from "@/lib/tts/useSpeech";
 import { usePushToTalk } from "@/lib/push-to-talk";
 import { MausAvatar } from "./Avatar";
-import { isRoutineApproval, pendingApprovals, spokenApprovalPrompt } from "./PendingApproval";
+import { isRoutineApproval, isSkillApproval, pendingApprovals, spokenApprovalPrompt } from "./PendingApproval";
 import { cn } from "@/lib/cn";
 import { track } from "@/lib/analytics";
 import { useDesktopCapabilities } from "./DesktopCapabilities";
@@ -74,10 +75,12 @@ export function CallTargetButton({
   const { capabilities, ready: capabilitiesReady } = useDesktopCapabilities();
   const active = useOnCall() === targetId;
   const supported = capabilities.dictation.available && Boolean(window.ogb?.speechStart);
-  const configured = Boolean(state.config?.tts?.configured);
+  const localVoice = localSystemVoiceActive();
+  const configured = localVoice || Boolean(state.config?.tts?.configured);
   const everyTargetHasVoice = voices.length > 0 && voices.every((voice) => Boolean(voice));
   const voiceReady =
-    configured && (requireExplicitVoices ? everyTargetHasVoice : Boolean(state.config?.tts?.ready || everyTargetHasVoice));
+    localVoice ||
+    (configured && (requireExplicitVoices ? everyTargetHasVoice : Boolean(state.config?.tts?.ready || everyTargetHasVoice)));
   const unavailable = !active && (!capabilitiesReady || !supported || !voiceReady);
   const voiceSetupRequired = capabilitiesReady && supported && !voiceReady;
   const [helpOpen, setHelpOpen] = useState(false);
@@ -175,7 +178,7 @@ export function CallTargetButton({
               onClick={() => {
                 setHelpOpen(false);
                 if (setupBotId && setupBotId !== targetId) dispatch({ type: "select", id: setupBotId });
-                dispatch({ type: "toggleSettings", open: true });
+                dispatch({ type: "toggleSettings", open: true, section: "voice" });
               }}
               className="mt-2.5 rounded-lg bg-accent px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110"
             >
@@ -227,7 +230,12 @@ function Call({ bot }: { bot: Bot }) {
 
   // the approval we last asked about aloud, so a card that stays open
   // while the user thinks is not re-read every render
-  const askedApproval = useRef<{ requestId: string; routine: boolean; submitted: boolean } | null>(null);
+  const askedApproval = useRef<{
+    requestId: string;
+    routine: boolean;
+    skill: boolean;
+    submitted: boolean;
+  } | null>(null);
   const askedQuestion = useRef<{ requestId: string; messageId: string } | null>(null);
   const phaseRef = useRef<Phase>(initialPhase);
   const alive = useRef(true);
@@ -322,6 +330,11 @@ function Call({ bot }: { bot: Bot }) {
         }
         if (YES.test(said) || NO.test(said)) {
           const allow = YES.test(said);
+          if (allow && open.skill) {
+            setHeard("");
+            void sayThenListen("Open this chat to review the complete skill before enabling it. You can say no now to deny it.");
+            return;
+          }
           // Keep this request claimed until the server's durable card patch
           // arrives. Clearing it here lets a render in that network gap read
           // and submit the same approval again.
@@ -428,10 +441,14 @@ function Call({ bot }: { bot: Bot }) {
       askedApproval.current = {
         requestId: approval.requestId,
         routine: isRoutineApproval(approval),
+        skill: isSkillApproval(approval),
         submitted: false,
       };
       spokenIds.current.add(approval.message.id);
-      void sayThenListen(spokenApprovalPrompt(approval, bot.name));
+      const skillPrompt = approval.message.card?.skillRequest?.action === "update"
+        ? `${bot.name} wants to update a learned skill. Open this chat to review the complete skill before replacing the current version. You can say no to deny it.`
+        : `${bot.name} wants to enable a new learned skill. Open this chat to review the complete skill before enabling it. You can say no to deny it.`;
+      void sayThenListen(isSkillApproval(approval) ? skillPrompt : spokenApprovalPrompt(approval, bot.name));
       return;
     }
     if (
@@ -526,7 +543,7 @@ function Call({ bot }: { bot: Bot }) {
         <X size={18} />
       </button>
 
-      <MausAvatar color={bot.color} state={mascotState} size={220} animated trackPointer />
+      <MausAvatar color={bot.color} bodyId={bot.mascotBody ?? undefined} state={mascotState} size={220} animated trackPointer />
 
       <div className="flex flex-col items-center gap-1.5 text-center">
         <div className="text-[20px] font-medium text-ink">{bot.name}</div>

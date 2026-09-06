@@ -6,6 +6,9 @@
 // did that and having two folds is how two clients start disagreeing.
 import SwiftUI
 import CompanionCore
+import PhotosUI
+import UniformTypeIdentifiers
+import ImageIO
 // Unconditional, because the uses below are: `Color(uiColor:)` and
 // `UIImage(data:)` are reached on every path through this file. A
 // `canImport` guard around the import alone does not make the file portable
@@ -29,6 +32,19 @@ struct ChatView: View {
     @State private var showingProfile = false
     @State private var showCommandHUD = false
     @State private var shareFile: ShareFile?
+    @State private var showingPhotoPicker = false
+    @State private var showingFileImporter = false
+    @State private var selectedPhotos: [PhotosPickerItem] = []
+    @State private var attachments: [PendingMessageAttachment] = []
+    @State private var preparingAttachments = false
+    @State private var sendingMessage = false
+    @State private var attachmentError: String?
+    @State private var openingFileName: String?
+    @State private var fileOpenError: String?
+    @State private var filePreview: FilePreviewItem?
+    @State private var fileDownloadTask: Task<Void, Never>?
+    @State private var fileDownloadRequestID: UUID?
+    @State private var acceptsNextHardwareLineBreak = false
     @FocusState private var composerFocused: Bool
     @StateObject private var dictation = SpeechDictation()
     /// The opening beat: the island grows with the bot's face in it, then
@@ -37,6 +53,11 @@ struct ChatView: View {
     @State private var islandExpanded = false
     @State private var islandVisible = false
     @State private var facePhase: CGFloat = 0
+
+    @AppStorage(PrefKey.islandIntro) private var islandIntro = IslandIntro.oncePerBot.rawValue
+    @AppStorage(PrefKey.islandSeen) private var islandSeen = ""
+    @AppStorage(PrefKey.activityDetail) private var activityDetail = ActivityDetail.full.rawValue
+    @AppStorage(PrefKey.quickReplies) private var quickReplies = ""
 
     /// The live bubble's scroll target. A constant because there is at most
     /// one per chat and it has no message id to borrow.
@@ -56,8 +77,31 @@ struct ChatView: View {
     /// live record instead of the snapshot that opened this screen.
     private var threadId: String { current.threadId }
 
+    /// A task changes a bot's thread, but it does not make it a new bot.
+    /// Intro history follows the chat itself so switching tasks cannot replay
+    /// a once-per-bot greeting.
+    private var islandIntroID: String {
+        switch current {
+        case let .bot(bot): "bot.\(bot.id)"
+        case let .room(room): "room.\(room.id)"
+        }
+    }
+
     private var messages: [Message] {
         session.state.visibleTranscript(forThread: threadId)
+    }
+
+    /// The transcript as the reader has asked to see it: every chip, folded
+    /// runs, or none at all.
+    private var rows: [TranscriptRow] {
+        transcriptRows(messages, detail: ActivityDetail(rawValue: activityDetail) ?? .full)
+    }
+
+    /// The composer's chip row, as edited in Settings.
+    private var storedChips: [ActionChipItem] {
+        QuickReply.decode(quickReplies).map {
+            ActionChipItem(id: $0.id, title: $0.title, icon: $0.icon, prompt: $0.prompt)
+        }
     }
 
     /// Unread elsewhere — what the back pill's badge counts, like Messages.
@@ -70,7 +114,7 @@ struct ChatView: View {
         // Read the transcript once for this render. Pagination changes the
         // array as a unit; repeatedly reaching through ObservableObject for
         // every row only recomputes the same value.
-        let transcript = messages
+        let transcript = rows
         // A VStack with the composer as a sibling, rather than a scroll view
         // with `.safeAreaInset`. The inset version sized itself to its
         // content, so a short transcript left the composer floating in the
@@ -107,25 +151,31 @@ struct ChatView: View {
                             .padding(.vertical, 8)
                         }
 
-                        ForEach(Array(transcript.enumerated()), id: \.element.id) { index, message in
+                        ForEach(Array(transcript.enumerated()), id: \.element.id) { index, row in
                             VStack(alignment: .leading, spacing: 6) {
                                 // a gap in time is worth marking; a timestamp
                                 // on every message is just noise
                                 if startsANewStretch(at: index, in: transcript) {
-                                    Text(RelativeStamp.separator(message.date))
+                                    Text(RelativeStamp.separator(row.head.date))
                                         .font(.system(size: 12, weight: .medium))
                                         .foregroundStyle(Color.secondary.opacity(0.7))
                                         .frame(maxWidth: .infinity)
                                         .padding(.top, 10)
                                         .padding(.bottom, 4)
                                 }
-                                MessageRow(
-                                    chat: current,
-                                    message: message,
-                                    endsRun: endsRun(at: index, in: transcript)
-                                )
+                                switch row {
+                                case let .message(message):
+                                    MessageRow(
+                                        chat: current,
+                                        message: message,
+                                        endsRun: endsRun(at: index, in: transcript),
+                                        openLink: openLink
+                                    )
+                                case let .activityRun(items):
+                                    ActivityRunChip(items: items)
+                                }
                             }
-                            .id(message.id)
+                            .id(row.id)
                         }
 
                         // The reply as it is typed. It sits after the last
@@ -150,7 +200,8 @@ struct ChatView: View {
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(maxWidth: CompanionLayout.chatWidth, alignment: .leading)
+                    .frame(maxWidth: .infinity)
                 }
                 // The header lives in the scroll view's top safe area: the
                 // transcript starts below it and scrolls under it — that is
@@ -189,7 +240,19 @@ struct ChatView: View {
                 }
                 .task {
                     // grow, hold a beat, shrink — the face rides along
-                    guard !reduceMotion else { return }
+                    guard CompanionLayout.supportsIslandPresentation, !reduceMotion else { return }
+                    // The intro is a greeting, and a greeting repeated every
+                    // time you open a chat stops being one.
+                    let intro = IslandIntro(rawValue: islandIntro) ?? .oncePerBot
+                    switch intro {
+                    case .never:
+                        return
+                    case .oncePerBot:
+                        guard !IslandSeen.contains(islandIntroID, in: islandSeen) else { return }
+                        islandSeen = IslandSeen.adding(islandIntroID, to: islandSeen)
+                    case .always:
+                        break
+                    }
                     islandVisible = true
                     try? await Task.sleep(for: .milliseconds(40))
                     withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) { islandExpanded = true; facePhase = 1 }
@@ -202,6 +265,19 @@ struct ChatView: View {
                 // than the screen rests at the bottom, and opening a chat
                 // starts on the newest message rather than the oldest.
                 .defaultScrollAnchor(.bottom)
+                // Tapping the transcript puts the keyboard away. The composer
+                // is a sibling of this scroll view rather than inside it, so
+                // nothing else here drops its focus — until this, the only way
+                // back to the whole conversation was to leave the chat.
+                // Simultaneous, not `.onTapGesture`: a tap that lands on a
+                // link, a card button or a selected word still reaches the row
+                // that owns it, and only also closes the keyboard.
+                .simultaneousGesture(TapGesture().onEnded {
+                    if composerFocused { composerFocused = false }
+                })
+                // And a drag down over the transcript pushes it away, the way
+                // it does in Mail and Messages.
+                .scrollDismissesKeyboard(.interactively)
                 .onChange(of: transcript.last?.id) { _, _ in
                     guard let last = transcript.last else { return }
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
@@ -258,7 +334,16 @@ struct ChatView: View {
             // bit here rather than leaving a badge on an open conversation.
             if unread { Task { await session.markRead(current) } }
         }
-        .onDisappear { dictation.stop() }
+        .onChange(of: threadId) { _, _ in
+            // ChatView follows a bot when its active task changes. A download
+            // started in the previous task must not open a sheet (or surface
+            // its error) in the new one when the network reply arrives late.
+            resetFilePreview()
+        }
+        .onDisappear {
+            dictation.stop()
+            resetFilePreview()
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { dictation.stop() }
         }
@@ -297,6 +382,28 @@ struct ChatView: View {
         }
         .sheet(item: $shareFile) { file in
             ActivityShareSheet(items: [file.url])
+        }
+        .photosPicker(
+            isPresented: $showingPhotoPicker,
+            selection: $selectedPhotos,
+            maxSelectionCount: max(1, AttachmentPolicy.maximumItems - attachments.count),
+            matching: .images,
+            preferredItemEncoding: .current
+        )
+        .onChange(of: selectedPhotos) { _, items in
+            guard !items.isEmpty else { return }
+            Task { await importPhotos(items) }
+        }
+        .fileImporter(
+            isPresented: $showingFileImporter,
+            allowedContentTypes: [.content],
+            allowsMultipleSelection: true,
+            onCompletion: importFiles
+        )
+        .fullScreenCover(item: $filePreview) { preview in
+            FilePreviewView(item: preview) {
+                filePreview = nil
+            }
         }
     }
 
@@ -342,6 +449,8 @@ struct ChatView: View {
         .padding(.horizontal, 16)
         .padding(.top, 4)
         .padding(.bottom, 8)
+        .frame(maxWidth: CompanionLayout.headerWidth)
+        .frame(maxWidth: .infinity)
         .background(
             Rectangle()
                 .fill(.ultraThinMaterial)
@@ -377,8 +486,8 @@ struct ChatView: View {
                 .buttonStyle(.plain)
                 .allowsHitTesting(!islandVisible)
                 .accessibilityHidden(islandVisible)
-                .accessibilityLabel("Open \(current.name) profile")
-                .accessibilityHint("Edits this agent's identity, avatar, notifications, and voice")
+                .accessibilityLabel("Open \(current.name) settings")
+                .accessibilityHint("Changes this bot's model, profile, notifications, and voice")
             } else {
                 Color.clear.frame(width: 60, height: 60)
             }
@@ -397,7 +506,7 @@ struct ChatView: View {
                             .foregroundStyle(Color.secondary)
                             .lineLimit(1)
                     }
-                    Image(systemName: current.isBot ? "person.crop.circle" : "ellipsis")
+                    Image(systemName: current.isBot ? "gearshape" : "ellipsis")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(Color.secondary)
                 }
@@ -408,7 +517,7 @@ struct ChatView: View {
             }
             .buttonStyle(.plain)
             .glassCapsule()
-            .accessibilityLabel(current.isBot ? "Open \(current.name) profile" : "Open \(current.name) chat options")
+            .accessibilityLabel(current.isBot ? "Open \(current.name) settings" : "Open \(current.name) chat options")
         }
         .padding(.top, -4)
     }
@@ -458,11 +567,11 @@ struct ChatView: View {
                     }
                 }
                 .padding(.vertical, 10)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: CompanionLayout.chatWidth, alignment: .leading)
                 .glassSheet(cornerRadius: 30)
-                .padding(.leading, 12)
-                .padding(.trailing, 44)
+                .padding(.horizontal, 12)
                 .padding(.bottom, 70)
+                .frame(maxWidth: .infinity)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
             .transition(.opacity)
@@ -472,15 +581,26 @@ struct ChatView: View {
     private struct PlusAction: Identifiable {
         let id: String
         let systemImage: String
-        let title: String
-        let subtitle: String
+        let title: LocalizedStringKey
+        let subtitle: LocalizedStringKey
         var destructive = false
         var disabled = false
         let run: () -> Void
     }
 
     private var plusActions: [PlusAction] {
-        var out: [PlusAction] = []
+        let canAddAttachment = attachments.count < AttachmentPolicy.maximumItems
+            && !preparingAttachments && !sendingMessage
+        var out: [PlusAction] = [
+            PlusAction(
+                id: "photos", systemImage: "photo.on.rectangle", title: "Photo Library",
+                subtitle: "Add a photo to this message", disabled: !canAddAttachment
+            ) { showingPhotoPicker = true },
+            PlusAction(
+                id: "files", systemImage: "paperclip", title: "Choose File",
+                subtitle: "Add a document from Files", disabled: !canAddAttachment
+            ) { showingFileImporter = true },
+        ]
         if case let .bot(bot) = current {
             out.append(PlusAction(
                 id: "task", systemImage: "plus.square.on.square", title: "New task",
@@ -490,6 +610,10 @@ struct ChatView: View {
                 id: "tasks", systemImage: "square.stack", title: "Tasks",
                 subtitle: "Switch, rename or remove one"
             ) { showingTasks = true })
+            out.append(PlusAction(
+                id: "settings", systemImage: "gearshape", title: "Bot settings",
+                subtitle: "Model, profile, voice and notifications"
+            ) { showingProfile = true })
             out.append(PlusAction(
                 id: "computer", systemImage: "display", title: "Watch computer",
                 subtitle: "Live view of what \(bot.name) is doing"
@@ -537,25 +661,49 @@ struct ChatView: View {
 
     /// True when this message opens a fresh stretch of conversation — the
     /// first one, or one that follows a gap of half an hour or more.
-    private func startsANewStretch(at index: Int, in messages: [Message]) -> Bool {
+    private func startsANewStretch(at index: Int, in rows: [TranscriptRow]) -> Bool {
         guard index > 0 else { return true }
-        return messages[index].at - messages[index - 1].at > 30 * 60 * 1000
+        return rows[index].at - rows[index - 1].endAt > 30 * 60 * 1000
     }
 
     /// True when the next message is from someone else (or there is none),
     /// which is where a run of bubbles gets its tail — one per run, like
     /// every messaging app, rather than one per bubble.
-    private func endsRun(at index: Int, in messages: [Message]) -> Bool {
-        guard index + 1 < messages.count else { return true }
-        let this = messages[index], next = messages[index + 1]
+    private func endsRun(at index: Int, in rows: [TranscriptRow]) -> Bool {
+        guard index + 1 < rows.count else { return true }
+        let this = rows[index], next = rows[index + 1]
         if this.role != next.role { return true }
-        if this.from?.name != next.from?.name { return true }
+        if this.senderName != next.senderName { return true }
         // a card or a tool chip between two texts breaks the run visually
         return next.kind != .text
     }
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
+            && !preparingAttachments && !sendingMessage
+    }
+
+    /// A vertically growing SwiftUI TextField treats the software keyboard's
+    /// Return key as a newline even when the key is labelled “Send”. Intercept
+    /// that proposed edit before it reaches the draft. Hardware Shift-Return
+    /// opts into one real line break through `acceptsNextHardwareLineBreak`.
+    private var composerDraft: Binding<String> {
+        Binding(
+            get: { draft },
+            set: { proposed in
+                if acceptsNextHardwareLineBreak {
+                    acceptsNextHardwareLineBreak = false
+                    draft = proposed
+                } else if ComposerKeyboard.shouldSubmit(
+                    previousText: draft,
+                    proposedText: proposed
+                ) {
+                    submit()
+                } else {
+                    draft = proposed
+                }
+            }
+        )
     }
 
     private var hasPendingApproval: Bool {
@@ -566,13 +714,252 @@ struct ChatView: View {
         // This also cancels an in-flight permission prompt before it can
         // open the microphone after the message has already been sent.
         dictation.stop()
-        let text = (explicitText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        draft = ""
+        let draftAtSend = draft
+        let text = (explicitText ?? draftAtSend).trimmingCharacters(in: .whitespacesAndNewlines)
+        let outgoingAttachments = attachments
+        guard !text.isEmpty || !outgoingAttachments.isEmpty,
+              !preparingAttachments,
+              !sendingMessage
+        else { return }
+        sendingMessage = true
+        attachmentError = nil
         showCommandHUD = false
-        SoundEffects.playSent()
-        Haptics.impact(.medium)
-        Task { await session.send(text, to: current) }
+        showingPlus = false
+        Task {
+            let sent = await session.send(
+                text: text,
+                attachments: outgoingAttachments,
+                to: current
+            )
+            sendingMessage = false
+            guard sent else {
+                attachmentError = session.actionError ?? "Couldn't send this message. Try again."
+                session.actionError = nil
+                return
+            }
+            // HUD commands expand `/diff` into a longer prompt. Compare with
+            // what was actually in the field at tap time, not the expanded
+            // text, so the command clears without erasing a newer edit.
+            if draft == draftAtSend {
+                draft = ""
+            }
+            if attachments.map(\.id) == outgoingAttachments.map(\.id) {
+                attachments = []
+            }
+            SoundEffects.playSent()
+            Haptics.impact(.medium)
+        }
+    }
+
+    private func importPhotos(_ items: [PhotosPickerItem]) async {
+        guard !preparingAttachments, !sendingMessage else { return }
+        let available = AttachmentPolicy.maximumItems - attachments.count
+        guard items.count <= available else {
+            selectedPhotos = []
+            attachmentError = "Send up to \(AttachmentPolicy.maximumItems) items at a time."
+            return
+        }
+
+        preparingAttachments = true
+        attachmentError = nil
+        defer {
+            preparingAttachments = false
+            selectedPhotos = []
+        }
+
+        do {
+            var imported: [PendingMessageAttachment] = []
+            for (index, item) in items.enumerated() {
+                guard let raw = try await item.loadTransferable(type: Data.self) else {
+                    throw AttachmentImportError.unreadable("that photo")
+                }
+                let actualType = CGImageSourceCreateWithData(raw as CFData, nil)
+                    .flatMap(CGImageSourceGetType)
+                    .flatMap { UTType($0 as String) }
+                let actualMime = actualType?.preferredMIMEType
+                    .map(AttachmentPolicy.normalizedMIME)
+
+                let data: Data
+                let mime: String
+                let fileExtension: String
+                if let actualMime, AttachmentPolicy.imageMIMETypes.contains(actualMime) {
+                    data = raw
+                    mime = actualMime
+                    fileExtension = actualType?.preferredFilenameExtension ?? "jpg"
+                } else if let image = UIImage(data: raw),
+                          let jpeg = image.jpegData(compressionQuality: 0.9) {
+                    data = jpeg
+                    mime = "image/jpeg"
+                    fileExtension = "jpg"
+                } else {
+                    throw AttachmentImportError.unsupported("that photo")
+                }
+
+                let candidate = PendingMessageAttachment(
+                    id: UUID(),
+                    data: data,
+                    name: items.count == 1 ? "Photo.\(fileExtension)" : "Photo \(index + 1).\(fileExtension)",
+                    mime: mime,
+                    kind: .image
+                )
+                try AttachmentPolicy.validate(attachments + imported + [candidate])
+                imported.append(candidate)
+            }
+            attachments.append(contentsOf: imported)
+            Haptics.selection()
+        } catch {
+            attachmentError = error.localizedDescription
+        }
+    }
+
+    private func importFiles(_ result: Result<[URL], Error>) {
+        guard case let .success(urls) = result else {
+            if case let .failure(error) = result { attachmentError = error.localizedDescription }
+            return
+        }
+        guard !urls.isEmpty else { return }
+        Task { await importFiles(urls) }
+    }
+
+    private func importFiles(_ urls: [URL]) async {
+        guard !preparingAttachments, !sendingMessage else { return }
+        let available = AttachmentPolicy.maximumItems - attachments.count
+        guard urls.count <= available else {
+            attachmentError = "Send up to \(AttachmentPolicy.maximumItems) items at a time."
+            return
+        }
+
+        preparingAttachments = true
+        attachmentError = nil
+        defer { preparingAttachments = false }
+
+        do {
+            var imported: [PendingMessageAttachment] = []
+            for url in urls {
+                let usedBytes = (attachments + imported).reduce(0) { $0 + $1.data.count }
+                let remainingBytes = max(0, AttachmentPolicy.maximumTotalBytes - usedBytes)
+                let candidate = try await Task.detached(priority: .userInitiated) {
+                    try Self.readImportedFile(url, remainingBytes: remainingBytes)
+                }.value
+                try AttachmentPolicy.validate(attachments + imported + [candidate])
+                imported.append(candidate)
+            }
+            attachments.append(contentsOf: imported)
+            Haptics.selection()
+        } catch {
+            attachmentError = error.localizedDescription
+        }
+    }
+
+    nonisolated private static func readImportedFile(
+        _ url: URL,
+        remainingBytes: Int
+    ) throws -> PendingMessageAttachment {
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+
+        let values = try url.resourceValues(
+            forKeys: [.contentTypeKey, .isRegularFileKey, .fileSizeKey]
+        )
+        guard values.isRegularFile != false else {
+            throw AttachmentImportError.unreadable(url.lastPathComponent)
+        }
+        let name = url.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { throw AttachmentImportError.unreadable("that file") }
+        let inferred = values.contentType ?? UTType(filenameExtension: url.pathExtension)
+        let mime = AttachmentPolicy.normalizedMIME(
+            inferred?.preferredMIMEType ?? "application/octet-stream"
+        )
+        guard let kind = AttachmentPolicy.kind(forMIME: mime) else {
+            throw AttachmentImportError.unsupported(name)
+        }
+        let itemLimit = kind == .image
+            ? AttachmentPolicy.maximumImageBytes
+            : AttachmentPolicy.maximumFileBytes
+        let readLimit = min(itemLimit, remainingBytes)
+        if let fileSize = values.fileSize, fileSize > readLimit {
+            throw AttachmentImportError.tooLarge(name, readLimit)
+        }
+        // Some document providers do not report a size. Never let that turn
+        // into an unbounded read of a provider-controlled file: read one byte
+        // past the remaining allowance and reject it before it can become a
+        // large in-memory draft.
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: readLimit + 1) ?? Data()
+        guard data.count <= readLimit else {
+            throw AttachmentImportError.tooLarge(name, readLimit)
+        }
+        return PendingMessageAttachment(
+            id: UUID(), data: data, name: name, mime: mime, kind: kind
+        )
+    }
+
+    private func openLink(_ url: URL, from message: Message) -> OpenURLAction.Result {
+        guard let target = LocalMessageLink.resolve(url) else {
+            fileOpenError = "This link can't be opened securely."
+            return .handled
+        }
+        switch target {
+        case let .web(webURL):
+            return .systemAction(webURL)
+        case let .desktopFile(path):
+            openFile(path: path, from: message)
+            return .handled
+        }
+    }
+
+    private func openFile(path: String, from message: Message) {
+        fileDownloadTask?.cancel()
+        let requestID = UUID()
+        fileDownloadRequestID = requestID
+        let requestedThreadID = threadId
+        fileOpenError = nil
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        openingFileName = name.isEmpty ? "file" : name
+        let task = Task {
+            let downloaded = await session.downloadFile(
+                threadId: requestedThreadID,
+                messageId: message.id,
+                path: path
+            )
+            if let downloaded, let preview = FilePreviewItem(downloaded: downloaded) {
+                // Own the temporary file before checking cancellation so an
+                // old link tap cannot strand it between Session and the sheet.
+                guard !Task.isCancelled, fileDownloadRequestID == requestID else {
+                    preview.cleanUp()
+                    return
+                }
+                openingFileName = nil
+                filePreview?.cleanUp()
+                filePreview = preview
+                fileDownloadRequestID = nil
+                fileDownloadTask = nil
+                return
+            }
+            guard !Task.isCancelled, fileDownloadRequestID == requestID else { return }
+            openingFileName = nil
+            fileDownloadRequestID = nil
+            fileDownloadTask = nil
+            guard downloaded != nil else {
+                fileOpenError = session.actionError ?? "Couldn't open that file. Try again."
+                session.actionError = nil
+                return
+            }
+            fileOpenError = "The downloaded file couldn't be previewed."
+        }
+        fileDownloadTask = task
+    }
+
+    /// End the preview lifecycle owned by the task that just left the screen.
+    private func resetFilePreview() {
+        fileDownloadTask?.cancel()
+        fileDownloadTask = nil
+        fileDownloadRequestID = nil
+        openingFileName = nil
+        fileOpenError = nil
+        filePreview?.cleanUp()
+        filePreview = nil
     }
 
     // MARK: - Composer
@@ -580,6 +967,54 @@ struct ChatView: View {
     /// A round + and a glass pill with dictation and send inside it.
     private var composer: some View {
         VStack(spacing: 6) {
+            if preparingAttachments || sendingMessage {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(preparingAttachments ? "Preparing attachments…" : "Sending…")
+                        .font(.system(size: 13, weight: .medium))
+                }
+                .foregroundStyle(Color.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 4)
+                .accessibilityElement(children: .combine)
+            }
+
+            if let openingFileName {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Opening \(openingFileName)…")
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                }
+                .foregroundStyle(Color.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 4)
+                .accessibilityElement(children: .combine)
+            }
+
+            if let error = fileOpenError ?? attachmentError {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(Color.orange)
+                    Text(error)
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Button("Dismiss") {
+                        fileOpenError = nil
+                        attachmentError = nil
+                    }
+                    .font(.system(size: 13, weight: .semibold))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                .accessibilityElement(children: .combine)
+            }
+
             if let error = dictation.error {
                 Text(error)
                     .font(.system(size: 13))
@@ -610,11 +1045,29 @@ struct ChatView: View {
                     }
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else if draft.isEmpty && !current.busy && !hasPendingApproval {
-                PredictiveActionChipsView(accentColor: MausPalette.color(current.color)) { chip in
+            } else if draft.isEmpty && attachments.isEmpty && !current.busy
+                        && !hasPendingApproval && !storedChips.isEmpty {
+                PredictiveActionChipsView(chips: storedChips, accentColor: MausPalette.color(current.color)) { chip in
                     submit(chip.prompt)
                 }
                 .transition(.opacity)
+            }
+
+            if !attachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(attachments) { attachment in
+                            PendingAttachmentChip(attachment: attachment) {
+                                guard !preparingAttachments, !sendingMessage else { return }
+                                attachments.removeAll { $0.id == attachment.id }
+                                attachmentError = nil
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                }
+                .scrollClipDisabled()
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
             GlassGroup(spacing: 10) {
@@ -634,6 +1087,7 @@ struct ChatView: View {
                     }
                     .buttonStyle(.plain)
                     .glassCapsule()
+                    .disabled(preparingAttachments || sendingMessage)
                     .accessibilityLabel(showingPlus ? "Close" : "More")
 
                     HStack(alignment: .bottom, spacing: 6) {
@@ -650,13 +1104,14 @@ struct ChatView: View {
                                 .frame(width: 30, height: 32)
                         }
                         .buttonStyle(.plain)
+                        .disabled(preparingAttachments || sendingMessage)
                         .accessibilityLabel("Slash commands")
                         .padding(.leading, 6)
                         .padding(.bottom, 6)
 
                         TextField(
-                            dictation.isListening ? "Listening…" : "Ask \(current.name)",
-                            text: $draft,
+                            sendingMessage ? "Sending…" : dictation.isListening ? "Listening…" : "Ask \(current.name)",
+                            text: composerDraft,
                             axis: .vertical
                         )
                             .lineLimit(1...5)
@@ -666,14 +1121,21 @@ struct ChatView: View {
                             .submitLabel(.send)
                             // Partial transcripts rebuild from a frozen base;
                             // prevent competing edits without dimming the text.
-                            .allowsHitTesting(!dictation.isListening && !dictation.isStarting)
+                            .allowsHitTesting(
+                                !dictation.isListening && !dictation.isStarting
+                                    && !preparingAttachments && !sendingMessage
+                            )
                             .onChange(of: draft) { _, value in
                                 withAnimation(.easeInOut(duration: 0.15)) {
                                     showCommandHUD = value.hasPrefix("/")
                                 }
                             }
                             .onKeyPress(.return, phases: .down) { press in
-                                guard !press.modifiers.contains(.shift) else { return .ignored }
+                                if press.modifiers.contains(.shift) {
+                                    acceptsNextHardwareLineBreak = true
+                                    return .ignored
+                                }
+                                acceptsNextHardwareLineBreak = false
                                 submit()
                                 return .handled
                             }
@@ -697,6 +1159,7 @@ struct ChatView: View {
                                 .symbolEffect(.pulse, isActive: dictation.isListening)
                         }
                         .buttonStyle(.plain)
+                        .disabled(preparingAttachments || sendingMessage)
                         .padding(.bottom, 6)
                         .accessibilityLabel(dictation.isListening ? "Stop dictation" : "Start dictation")
 
@@ -723,6 +1186,8 @@ struct ChatView: View {
         .padding(.horizontal, 12)
         .padding(.top, 6)
         .padding(.bottom, 8)
+        .frame(maxWidth: CompanionLayout.chatWidth)
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -731,9 +1196,12 @@ struct MessageRow: View {
     let message: Message
     /// Last bubble of a run from the same side: the one that gets the tail.
     var endsRun = true
+    let openLink: (URL, Message) -> OpenURLAction.Result
     @EnvironmentObject private var session: Session
     @State private var editingText = ""
     @State private var showingEdit = false
+    /// The text being selected, and the sheet's presentation in one value.
+    @State private var selecting: SelectableText?
 
     private static let reactionChoices = ["👍", "❤️", "😂", "🎉", "👀"]
 
@@ -741,12 +1209,20 @@ struct MessageRow: View {
         session.state.versions(of: message, inThread: chat.threadId)
     }
 
+    /// Transport tags contain paths on the paired computer. They belong in
+    /// attachment cards, never on the clipboard or in the text-selection UI.
+    private var attachedContent: AttachedMessageContent {
+        AttachedMessageContent.parse(message.text ?? "")
+    }
+
     var body: some View {
         VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 6) {
             content
 
             if let comm = message.comm {
-                Label("Messaged \(comm.withName)", systemImage: "arrow.up.right.bubble")
+                // the chip already says what happened ("Posted in Standup");
+                // a linked chip is not always a message sent to someone
+                Label(message.tool?.name ?? "Messaged \(comm.withName)", systemImage: "arrow.up.right.bubble")
                     .font(.system(size: 12))
                     .foregroundStyle(Color.secondary)
             }
@@ -790,7 +1266,27 @@ struct MessageRow: View {
                     Task { await session.react(to: message, in: chat.threadId, emoji: emoji) }
                 }
             }
-            if message.role == .user, message.kind == .text, case let .bot(bot) = chat {
+            let visibleText = attachedContent.text
+            if !visibleText.isEmpty {
+                Divider()
+                Button("Copy", systemImage: "doc.on.doc") {
+                    PlatformBridge.copyToPasteboard(visibleText)
+                }
+            }
+            // Copy above takes the whole reply. Selection happens in a sheet
+            // because long-press on the bubble already opens this menu.
+            if !visibleText.isEmpty {
+                Button("Select Text", systemImage: "selection.pin.in.out") {
+                    selecting = SelectableText(text: visibleText)
+                }
+            }
+            // An attachment edit cannot faithfully reconstruct the upload.
+            // Hiding this action is safer than silently dropping the file or
+            // sending its computer-local transport path back as prose.
+            if message.role == .user,
+               message.kind == .text,
+               attachedContent.attachments.isEmpty,
+               case let .bot(bot) = chat {
                 Divider()
                 Button("Edit and retry", systemImage: "pencil") {
                     editingText = message.text ?? ""
@@ -812,15 +1308,22 @@ struct MessageRow: View {
         } message: {
             Text("This creates a new version and continues from there.")
         }
+        .sheet(item: $selecting) { SelectableTextSheet(text: $0.text) }
     }
 
     @ViewBuilder
     private var content: some View {
         switch message.kind {
         case .text:
-            TextBubble(message: message, chat: chat, tailed: endsRun)
+            TextBubble(message: message, chat: chat, tailed: endsRun, openLink: openLink)
         case .options:
             CardView(chat: chat, message: message)
+        case .secret:
+            if let secret = message.secret {
+                CredentialRequestCardView(chat: chat, message: message, secret: secret)
+            } else if let text = message.text, !text.isEmpty {
+                TextBubble(message: message, chat: chat, tailed: endsRun, openLink: openLink)
+            }
         case .activity:
             ActivityChip(tool: message.tool)
         case .screen:
@@ -832,7 +1335,7 @@ struct MessageRow: View {
             // When there is nothing to show, show nothing — a placeholder
             // saying "unsupported" is a worse gap than the gap.
             if let text = message.text, !text.isEmpty {
-                TextBubble(message: message, chat: chat, tailed: endsRun)
+                TextBubble(message: message, chat: chat, tailed: endsRun, openLink: openLink)
             }
         }
     }
@@ -849,6 +1352,12 @@ private struct ShareFile: Identifiable {
     var id: String { url.path }
 }
 
+/// A message's text on its way to the selection sheet.
+struct SelectableText: Identifiable {
+    let id = UUID()
+    let text: String
+}
+
 private struct ActivityShareSheet: UIViewControllerRepresentable {
     let items: [Any]
 
@@ -863,6 +1372,11 @@ struct TextBubble: View {
     let message: Message
     let chat: Chat
     var tailed = true
+    let openLink: (URL, Message) -> OpenURLAction.Result
+
+    private var attachedContent: AttachedMessageContent {
+        AttachedMessageContent.parse(message.text ?? "")
+    }
 
     private var parsedDiff: (filename: String, diff: String)? {
         guard message.role != .user, let source = message.text else { return nil }
@@ -960,13 +1474,25 @@ struct TextBubble: View {
                 } else if let table = parsedTable {
                     SQLResultTableView(columns: table.headers, rows: table.rows)
                 } else if mine {
-                    Text(message.text ?? "")
-                        .font(.system(size: 17))
-                        .foregroundStyle(BubbleColor.mineText)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
+                    let shared = attachedContent
+                    ForEach(Array(shared.attachments.enumerated()), id: \.offset) { _, attachment in
+                        TranscriptAttachmentView(
+                            attachment: attachment,
+                            threadId: chat.threadId,
+                            messageId: message.id
+                        )
+                    }
+                    if !shared.text.isEmpty {
+                        Text(shared.text)
+                            .font(.system(size: 17))
+                            .foregroundStyle(BubbleColor.mineText)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 } else {
-                    MarkdownText(source: message.text ?? "")
+                    MarkdownText(source: message.text ?? "") { url in
+                        openLink(url, message)
+                    }
                         .foregroundStyle(Color.primary)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1004,6 +1530,415 @@ struct ActivityChip: View {
             .padding(.leading, 2)
         }
     }
+}
+
+/// A credential entered here is encrypted for the exact computer whose
+/// public key was pinned by the pairing QR. Password AutoFill remains
+/// provider-neutral: Apple Passwords works without another subscription,
+/// while 1Password, Bitwarden and other enabled providers work as usual.
+struct CredentialRequestCardView: View {
+    let chat: Chat
+    let message: Message
+    let secret: SecretRequestCardData
+    @EnvironmentObject private var session: Session
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var value = ""
+    @State private var fieldID = UUID()
+    @State private var preparedSubmission: PreparedPhoneCredential?
+    @State private var submissionTask: Task<Void, Never>?
+    @State private var activeSubmissionID: UUID?
+    @State private var submitting = false
+    @State private var submitted = false
+    @State private var submissionError: String?
+
+    private struct RequestIdentity: Equatable {
+        let connectionID: String?
+        let botID: String?
+        let threadID: String
+        let messageID: String
+        let target: String?
+        let requestKey: String?
+    }
+
+    private var tint: Color { MausPalette.color(message.from?.color ?? chat.color) }
+    private var requester: String { message.from?.name ?? chat.name }
+    private var label: String { visible(secret.label) ?? "API credential" }
+    private var accessibilityStatus: Text {
+        if secret.provided == true {
+            return secret.resumed == true
+            ? Text("Saved securely. The task resumed.")
+            : Text("Saved securely on your computer.")
+        }
+        if secret.dismissed == true { return Text("Not provided.") }
+        if submitted { return Text("Encrypted and sent to your computer.") }
+        if canEnterOnPhone { return Text("Enter it securely on this phone.") }
+        if !hasSecurePairing { return Text("Pair again by QR code, or finish on your computer.") }
+        return Text("Use secure phone access or Tailscale, or finish on your computer.")
+    }
+
+    private func visible(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private var helpURL: URL? {
+        guard let raw = secret.helpUrl,
+              let url = URL(string: raw),
+              url.scheme?.lowercased() == "https",
+              url.host != nil,
+              url.user == nil,
+              url.password == nil
+        else { return nil }
+        return url
+    }
+
+    private var hasSecurePairing: Bool {
+        guard secret.isPending,
+              visible(secret.target) != nil,
+              visible(secret.requestKey) != nil,
+              let connection = session.connection
+        else { return false }
+        return connection.secretPublicKey != nil && connection.companionDeviceId != nil
+    }
+
+    private var hasProtectedTransport: Bool {
+        session.phoneCredentialTransportIsProtected
+    }
+
+    private var canEnterOnPhone: Bool { hasSecurePairing && hasProtectedTransport }
+
+    private var placeholder: String { visible(secret.placeholder) ?? label }
+
+    private var canSubmit: Bool {
+        guard canEnterOnPhone, !submitting, !submitted else { return false }
+        return preparedSubmission != nil
+            || !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var requestIdentity: RequestIdentity {
+        let botID: String?
+        switch chat {
+        case let .bot(bot): botID = bot.id
+        case .room: botID = message.from?.botId
+        }
+        return RequestIdentity(
+            connectionID: session.connection?.id,
+            botID: botID,
+            threadID: chat.threadId,
+            messageID: message.id,
+            target: secret.target,
+            requestKey: secret.requestKey
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 11) {
+                Image(systemName: "key.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(tint)
+                    .frame(width: 38, height: 38)
+                    .background(tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(label)
+                        .font(.system(size: 16, weight: .semibold))
+                    Text("Requested by \(requester)")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Color.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+
+            if let description = visible(secret.description) {
+                Text(description)
+                    .font(.system(size: 14.5))
+                    .foregroundStyle(Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if secret.provided == true {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(
+                        secret.resumed == true ? "Saved securely. The task resumed." : "Saved securely on your computer.",
+                        systemImage: "checkmark.shield.fill"
+                    )
+                    .foregroundStyle(.green)
+
+                    if secret.resumed != true, let preparedSubmission {
+                        Button(action: { send(preparedSubmission) }) {
+                            HStack(spacing: 7) {
+                                if submitting { ProgressView() }
+                                Image(systemName: "arrow.clockwise")
+                                Text(submitting ? "Resuming…" : "Try resuming the task")
+                            }
+                            .font(.system(size: 13, weight: .semibold))
+                        }
+                        .disabled(submitting || !hasProtectedTransport)
+                    }
+                }
+            } else if secret.dismissed == true {
+                Label("Not provided", systemImage: "xmark.circle")
+                    .foregroundStyle(Color.secondary)
+            } else if submitted {
+                Label("Encrypted and saved on your computer", systemImage: "checkmark.shield.fill")
+                    .foregroundStyle(.green)
+            } else if canEnterOnPhone {
+                VStack(alignment: .leading, spacing: 5) {
+                    Label("Enter securely on this phone", systemImage: "lock.shield.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(tint)
+
+                    if preparedSubmission == nil {
+                        SecureField(placeholder, text: $value)
+                            .id(fieldID)
+                            .textContentType(.password)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .privacySensitive()
+                            .disabled(submitting)
+                            .submitLabel(.done)
+                            .onSubmit { submit() }
+                            .padding(.horizontal, 12)
+                            .frame(minHeight: 44)
+                            .background(
+                                Color.secondary.opacity(0.1),
+                                in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            )
+                            .accessibilityLabel(label)
+                    } else {
+                        Label(
+                            submitting ? "Encrypted and saving…" : "Encrypted and ready to retry",
+                            systemImage: "lock.fill"
+                        )
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.secondary)
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .padding(.horizontal, 12)
+                        .background(
+                            Color.secondary.opacity(0.1),
+                            in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        )
+                    }
+
+                    Button(action: submit) {
+                        HStack(spacing: 7) {
+                            if submitting { ProgressView().tint(.white) }
+                            Image(systemName: "lock.fill")
+                            Text(
+                                submitting
+                                    ? "Saving securely…"
+                                    : preparedSubmission == nil ? "Save securely" : "Try again securely"
+                            )
+                        }
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(maxWidth: .infinity, minHeight: 42)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(tint)
+                    .disabled(!canSubmit)
+
+                    if preparedSubmission != nil, !submitting, submissionError != nil {
+                        Button("Enter a different value") {
+                            discardPreparedSubmission()
+                        }
+                        .font(.system(size: 13, weight: .medium))
+                    }
+
+                    Text("Use Apple Passwords, 1Password, Bitwarden, or paste. The value is encrypted for your computer and never added to chat.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(11)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            } else if !hasSecurePairing {
+                VStack(alignment: .leading, spacing: 5) {
+                    Label("Pair again to enter here", systemImage: "qrcode")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(tint)
+                    Text("This pairing predates secure phone entry. Scan a fresh QR from OpenMausBot, or finish this request on your computer.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(11)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            } else {
+                VStack(alignment: .leading, spacing: 5) {
+                    Label("Secure connection required", systemImage: "lock.shield.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(tint)
+                    Text("Switch to Secure phone access (HTTPS) or Tailscale, then try again. You can still finish this request on your computer.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(11)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            }
+
+            if let submissionError = visible(submissionError) {
+                Label(submissionError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let error = visible(secret.error) {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let helpURL {
+                Link(destination: helpURL) {
+                    Label("Where to get this key", systemImage: "arrow.up.right")
+                        .font(.system(size: 13, weight: .medium))
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color.secondary.opacity(0.09))
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(secret.isPending ? tint.opacity(0.65) : Color.clear, lineWidth: 1.25)
+        }
+        .accessibilityElement(children: canEnterOnPhone ? .contain : .combine)
+        .accessibilityLabel("\(label). \(accessibilityStatus)")
+        .onAppear {
+            preparedSubmission = session.preparedCredential(
+                chat: chat,
+                message: message,
+                secret: secret
+            )
+        }
+        .onChange(of: requestIdentity) { _, _ in
+            resetSensitiveState(clearPrepared: true)
+            preparedSubmission = session.preparedCredential(
+                chat: chat,
+                message: message,
+                secret: secret
+            )
+            submitted = false
+        }
+        .onChange(of: session.credentialEntryResetGeneration) { _, _ in
+            suspendSensitiveEntry()
+        }
+        .onChange(of: session.status) { _, status in
+            if status != .live { suspendSensitiveEntry() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // Password AutoFill and its Face ID sheet temporarily make the
+            // scene inactive. Removing the SecureField at that point breaks
+            // the very fill operation the user requested. A true background
+            // transition (including locking the phone) still scrubs it.
+            if phase == .background { suspendSensitiveEntry() }
+        }
+        .onDisappear {
+            // The async request owns only ciphertext and is safe to finish.
+            // Its envelope stays in Session so returning to this card can
+            // retry the exact same operation after an ambiguous response.
+            clearPlaintext()
+            submissionError = nil
+        }
+    }
+
+    private func submit() {
+        guard canSubmit else { return }
+        submissionError = nil
+        if let preparedSubmission {
+            send(preparedSubmission)
+            return
+        }
+
+        do {
+            // Encryption happens synchronously. No task closure ever captures
+            // the cleartext, and the native field is replaced immediately.
+            let prepared = try session.prepareCredential(
+                value,
+                chat: chat,
+                message: message,
+                secret: secret
+            )
+            clearPlaintext()
+            preparedSubmission = prepared
+            send(prepared)
+        } catch {
+            clearPlaintext()
+            submissionError = error.localizedDescription
+            Haptics.notification(.error)
+        }
+    }
+
+    private func send(_ prepared: PreparedPhoneCredential) {
+        submissionTask?.cancel()
+        let submissionID = UUID()
+        activeSubmissionID = submissionID
+        submissionError = nil
+        submitting = true
+
+        submissionTask = Task { @MainActor in
+            do {
+                try await session.provideCredential(prepared)
+                guard !Task.isCancelled, activeSubmissionID == submissionID else { return }
+                submitted = true
+                Haptics.success()
+            } catch {
+                guard !Task.isCancelled, activeSubmissionID == submissionID else { return }
+                // Keep only the exact ciphertext so Retry is the same
+                // idempotent operation. The cleartext field is already gone.
+                submissionError = error.localizedDescription
+                Haptics.notification(.error)
+            }
+
+            guard activeSubmissionID == submissionID else { return }
+            activeSubmissionID = nil
+            submissionTask = nil
+            submitting = false
+        }
+    }
+
+    private func clearPlaintext() {
+        value.removeAll(keepingCapacity: false)
+        // Replacing the SecureField also clears UIKit's backing control,
+        // including text inserted by Password AutoFill.
+        fieldID = UUID()
+    }
+
+    private func suspendSensitiveEntry() {
+        clearPlaintext()
+        activeSubmissionID = nil
+        submissionTask?.cancel()
+        submissionTask = nil
+        submitting = false
+        submissionError = nil
+        // Keep an already-encrypted envelope. If the request reached the
+        // computer before iOS suspended it, foreground Retry must send the
+        // exact same operation instead of generating fresh HPKE randomness.
+    }
+
+    private func resetSensitiveState(clearPrepared: Bool) {
+        suspendSensitiveEntry()
+        if clearPrepared, let preparedSubmission {
+            session.discardPreparedCredential(preparedSubmission)
+            self.preparedSubmission = nil
+        }
+    }
+
+    private func discardPreparedSubmission() {
+        resetSensitiveState(clearPrepared: true)
+        submitted = false
+    }
+
 }
 
 /// An option card. When it still has a request behind it, this is the
@@ -1057,6 +1992,42 @@ struct CardView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
+                if let skill = card.skillRequest {
+                    if let preview = skill.preview, let sha256 = skill.reviewedSha256 {
+                        VStack(alignment: .leading, spacing: 7) {
+                            HStack {
+                                Text("Review the complete SKILL.md")
+                                    .font(.system(size: 12, weight: .semibold))
+                                Spacer()
+                                Text("sha256 \(String(sha256.prefix(8)))")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(Color.secondary)
+                            }
+                            Text(skill.source.map { LocalizedStringKey("Source: \($0)") } ?? "Source: unknown")
+                                .font(.system(size: 11))
+                                .foregroundStyle(Color.secondary)
+                                .textSelection(.enabled)
+                            ScrollView(.vertical) {
+                                Text(preview)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundStyle(Color.primary)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(maxHeight: 220)
+                            .padding(10)
+                            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                        }
+                    } else {
+                        Label(
+                            "This proposal was created by an older build and cannot be safely applied. Deny it and ask the bot to create it again.",
+                            systemImage: "exclamationmark.shield"
+                        )
+                        .font(.system(size: 12))
+                        .foregroundStyle(.orange)
+                    }
+                }
+
                 if let held = card.held {
                     Label(held, systemImage: "exclamationmark.shield")
                         .font(.system(size: 13))
@@ -1084,7 +2055,11 @@ struct CardView: View {
                                     )
                             }
                             .buttonStyle(.plain)
-                            .disabled(answering)
+                            .disabled(
+                                answering ||
+                                    (card.skillRequest != nil && !Self.isRefusal(option) &&
+                                        card.skillRequest?.reviewedSha256 == nil)
+                            )
                         }
                     }
                     .padding(.top, 2)

@@ -16,10 +16,11 @@ import {
   botAvatarUrlFromStoredPath,
   type BotAvatarCrop,
 } from "../../shared/bot-avatar";
+import { MASCOT_BODIES, MASCOT_BODY_IDS } from "../../shared/mascot-bodies";
 import { BotAvatar, MausAvatar } from "./Avatar";
 
 type AvatarPatch = Partial<
-  Pick<Bot, "avatarCrop" | "avatarUrl" | "color" | "mascotExpression">
+  Pick<Bot, "avatarCrop" | "avatarUrl" | "color" | "mascotExpression" | "mascotBody">
 >;
 
 const CROP_LABEL = {
@@ -114,6 +115,10 @@ export function BotProfileAvatarCard({
       const latestCrop = cropRef.current;
       onPatch({
         avatarUrl: result.avatarUrl,
+        // The server owns this crop for generate (server/index.ts picks
+        // "circle" for a mascot bot). The fallback below is never actually
+        // reached, since the server always assigns a crop; "circle" is kept
+        // only as the truthful default if it ever were.
         avatarCrop:
           latestCrop === cropAtStart
             ? (result.bot.avatarCrop ?? "circle")
@@ -131,7 +136,7 @@ export function BotProfileAvatarCard({
       <div className="flex items-center justify-between border-b border-hairline/40 px-3 py-2.5">
         <span className="rounded-lg bg-control px-3 py-1.5 text-[14px] font-medium text-ink">Avatar</span>
         <button
-          onClick={() => onPatch({ avatarCrop: "mascot", color: "green", mascotExpression: null })}
+          onClick={() => onPatch({ avatarCrop: "mascot", color: "green", mascotExpression: null, mascotBody: "cursor" })}
           className="rounded-md px-2 py-1.5 text-[13px] text-ink-secondary hover:bg-control hover:text-ink"
         >
           Reset mascot
@@ -221,7 +226,7 @@ export function BotProfileAvatarCard({
                   title={expression}
                   aria-label={`Use ${expression} expression`}
                 >
-                  <MausAvatar color={bot.color} state={expression} size={42} animated={false} />
+                  <MausAvatar color={bot.color} bodyId={bot.mascotBody ?? undefined} state={expression} size={42} animated={false} />
                 </button>
               ))}
             </div>
@@ -244,6 +249,29 @@ export function BotProfileAvatarCard({
                   title={color}
                   aria-label={`Use ${color} mascot color`}
                 />
+              ))}
+            </div>
+
+            <div className="mb-2 mt-4 text-[12px] font-medium uppercase tracking-[0.08em] text-ink-secondary">
+              Body
+            </div>
+            <div className="grid grid-cols-5 gap-1.5">
+              {MASCOT_BODY_IDS.map((id) => (
+                <button
+                  key={id}
+                  type="button"
+                  aria-pressed={(bot.mascotBody ?? "cursor") === id}
+                  aria-label={`Use the ${MASCOT_BODIES[id].name} body`}
+                  onClick={() => onPatch({ mascotBody: id })}
+                  className={cn(
+                    "flex items-center justify-center rounded-lg py-1.5",
+                    (bot.mascotBody ?? "cursor") === id
+                      ? "bg-control text-ink"
+                      : "text-ink-secondary hover:bg-control/60",
+                  )}
+                >
+                  <MausAvatar color={bot.color} bodyId={id} size={34} animated={false} trackPointer={false} />
+                </button>
               ))}
             </div>
           </>

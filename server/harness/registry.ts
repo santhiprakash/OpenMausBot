@@ -9,6 +9,7 @@ import type {
   AnyProviderDriver,
   InstanceConfigMap,
   InstanceId,
+  ProviderAuthenticationStart,
   ProviderInstance,
   ProviderSnapshot,
 } from "../contracts.ts";
@@ -109,12 +110,58 @@ export class ProviderRegistry {
     return this.byId.get(instanceId)?.live ?? null;
   }
 
+  /** The configured executable for instance-scoped maintenance actions.
+   * This deliberately comes from the registry/config, never an HTTP body. */
+  cliTarget(instanceId: InstanceId): { driverKind: string; cli: string | null } | null {
+    const entry = this.byId.get(instanceId);
+    if (!entry) return null;
+    const driverKind = entry.shadow?.driverKind ?? entry.live!.driverKind;
+    const driver = this.driversByKind.get(driverKind);
+    return {
+      driverKind,
+      cli: this.cliByInstance.get(instanceId) ?? entry.shadow?.cli ?? cliDefaultOf(driver) ?? null,
+    };
+  }
+
   entries(): RegistryEntry[] {
     return [...this.byId.values()];
   }
 
   instances(): ProviderInstance[] {
     return [...this.byId.values()].flatMap((e) => (e.live ? [e.live] : []));
+  }
+
+  async refreshModels(instanceId: InstanceId): Promise<boolean> {
+    const instance = this.get(instanceId);
+    if (!instance) return false;
+    await instance.refreshModels?.();
+    return true;
+  }
+
+  async installRuntime(instanceId: InstanceId): Promise<boolean> {
+    const instance = this.get(instanceId);
+    if (!instance?.installRuntime) return false;
+    await instance.installRuntime();
+    return true;
+  }
+
+  async startAuthentication(instanceId: InstanceId): Promise<ProviderAuthenticationStart | null> {
+    const instance = this.get(instanceId);
+    return instance?.startAuthentication ? instance.startAuthentication() : null;
+  }
+
+  async completeAuthentication(instanceId: InstanceId, flowId: string, callbackUrl: string): Promise<boolean> {
+    const instance = this.get(instanceId);
+    if (!instance?.completeAuthentication) return false;
+    await instance.completeAuthentication(flowId, callbackUrl);
+    return true;
+  }
+
+  async cancelAuthentication(instanceId: InstanceId): Promise<boolean> {
+    const instance = this.get(instanceId);
+    if (!instance?.cancelAuthentication) return false;
+    await instance.cancelAuthentication();
+    return true;
   }
 
   /** instance snapshots for the model picker: id, driver, models, health */
@@ -155,7 +202,6 @@ export class ProviderRegistry {
         const inst = entry.live;
         let snapshot: ProviderSnapshot;
         try {
-          await inst.refreshModels?.();
           snapshot = await inst.snapshot();
         } catch (e) {
           snapshot = { state: "unavailable", reason: e instanceof Error ? e.message : String(e) };

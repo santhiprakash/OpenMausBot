@@ -12,20 +12,37 @@ export type RoutineRequestRunOn = "maus" | "cloud";
 
 export type RoutineRequestSchedule =
   | { type: "once"; at: number }
-  | { type: "daily"; time: string; weekdays: number[] };
+  | { type: "daily"; time: string; weekdays: number[] }
+  | { type: "interval"; everyMinutes: number; anchorAt?: number };
 
 export interface RoutineRequestDefinition {
   name: string;
   instructions: string;
   schedule: RoutineRequestSchedule;
   runOn: RoutineRequestRunOn;
+  /** Legacy calendar/display length. It does not stop an active run. */
   durationMinutes: number;
+  /** Optional safety cap for active work. Missing means no timeout. */
+  timeoutMinutes?: number;
+  /** Carry the previous run's report into the next run. */
+  continuity?: boolean;
 }
 
-export type RoutineRequestChanges = Partial<RoutineRequestDefinition>;
+export type RoutineRequestChanges =
+  & Omit<Partial<RoutineRequestDefinition>, "timeoutMinutes">
+  & { /** `null` removes an existing safety cap. */ timeoutMinutes?: number | null };
+
+/** Another bot in the proposer's section that the routine is scheduled for.
+ * Captured (id + display name) when the card is created so the card stays
+ * meaningful if the bot is later renamed; authority over the card remains
+ * with the proposing conversation. */
+export interface RoutineRequestTargetBot {
+  botId: string;
+  name: string;
+}
 
 export type RoutineRequestOperation =
-  | { action: "create"; routine: RoutineRequestDefinition }
+  | { action: "create"; routine: RoutineRequestDefinition; forBot?: RoutineRequestTargetBot }
   | { action: "update"; routineId: string; expectedUpdatedAt: number; changes: RoutineRequestChanges }
   | { action: "pause"; routineId: string; expectedUpdatedAt: number }
   | { action: "resume"; routineId: string; expectedUpdatedAt: number }

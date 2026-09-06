@@ -41,7 +41,7 @@ export function UsageSection() {
           {rows.map(({ bot, usage }) => (
             <div key={bot.id} className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-x-5 border-b border-hairline/20 py-2 text-[13px]">
               <span className="flex min-w-0 items-center gap-2 text-ink">
-                <MausAvatar color={bot.color} state="idle" size={22} animated={false} />
+                <MausAvatar color={bot.color} bodyId={bot.mascotBody ?? undefined} state="idle" size={22} animated={false} />
                 <span className="truncate">{bot.name}</span>
               </span>
               <span className="text-right tabular-nums text-ink-secondary">{usage.turns}</span>

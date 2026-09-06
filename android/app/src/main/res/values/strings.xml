@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OpenMausMobile</string>
+    <string name="notification_channel_blocking">Approvals and questions</string>
+    <string name="notification_channel_blocking_desc">Time-sensitive prompts that need an answer</string>
+    <string name="notification_channel_done">Finished work</string>
+    <string name="notification_channel_done_desc">When a bot finishes a turn</string>
+    <string name="notification_channel_routine">Routine failures</string>
+    <string name="notification_channel_routine_desc">When a scheduled routine fails</string>
+</resources>

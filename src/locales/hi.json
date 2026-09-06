@@ -1,0 +1,18 @@
+{
+  "noEngines.title": "शुरू करने के लिए एक AI इंजन इंस्टॉल करें",
+  "noEngines.intro": "{app} अपना कोई मॉडल नहीं देता — आपके बॉट इस कंप्यूटर पर इंस्टॉल की गई AI CLI पर, आपके मौजूदा लॉगिन से चलते हैं। इनमें से कोई भी सेट कर लें, और आपके बॉट चल पड़ेंगे।",
+  "engines.cloud": "क्लाउड",
+  "engines.local": "लोकल",
+  "common.checkAgain": "फिर से जाँचें",
+  "common.checking": "जाँच जारी…",
+  "approval.held.native": "इस कार्रवाई के लिए प्रदाता को आपकी मंज़ूरी चाहिए।",
+  "approval.held.sandbox": "इससे प्रदाता का सैंडबॉक्स बदलता है, इसलिए केवल Full access ही इसे अपने आप मंज़ूर कर सकता है।",
+  "approval.held.localComputer": "आपके कंप्यूटर का नियंत्रण «हमेशा अनुमति दें» में कभी शामिल नहीं होता, इसलिए यह आपके फ़ैसले पर है।",
+  "approval.held.unattended": "यह टर्न किसी webhook या दूसरे बॉट ने शुरू किया, इसलिए Approve for me रुका हुआ है और हर कार्रवाई पूछती है।",
+  "approval.held.unattendedFullAccess": "यह टर्न किसी webhook या दूसरे बॉट ने शुरू किया, इसलिए Approve for me रुका हुआ है और हर कार्रवाई पूछती है। Full access बिना निगरानी के चलता रहता है।",
+  "approval.held.destructive": "यह विनाशकारी लगता है, इसलिए Approve for me ने पूछने के लिए रोक दिया।",
+  "approval.held.sensitive": "यह क्रेडेंशियल्स से जुड़ा है, इसलिए Approve for me ने पूछने के लिए रोक दिया।",
+  "approval.held.needsYou": "इस कार्रवाई के लिए आपकी ज़रूरत है, इसलिए Approve for me ने पूछने के लिए रोक दिया।",
+  "approval.held.undeliveredFull": "Full access इस मंज़ूरी को पहुँचा नहीं सका।",
+  "approval.held.undelivered": "Approve for me इसका जवाब नहीं दे सका।"
+}

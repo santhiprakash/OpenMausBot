@@ -16,11 +16,11 @@ struct PairingScannerSheet: View {
 
     /// Return nil to accept and close, or a human-readable validation error
     /// to keep scanning. The one-time credential never lives in this view.
-    let validate: (String) -> String?
+    let validate: (String) -> LocalizedStringKey?
 
     @State private var cameraAuthorized = AVCaptureDevice.authorizationStatus(for: .video) == .authorized
     @State private var permissionResolved = AVCaptureDevice.authorizationStatus(for: .video) != .notDetermined
-    @State private var validationError: String?
+    @State private var validationError: LocalizedStringKey?
 
     var body: some View {
         NavigationStack {
@@ -43,7 +43,7 @@ struct PairingScannerSheet: View {
                     ContentUnavailableView {
                         Label("Scanner unavailable", systemImage: "qrcode.viewfinder")
                     } description: {
-                        Text("Use this iPhone's Camera app to scan the QR code, or enter the address and code manually.")
+                        Text("Use the Camera app to scan the QR code, or enter the address and code manually.")
                     }
                 } else {
                     ZStack(alignment: .bottom) {
