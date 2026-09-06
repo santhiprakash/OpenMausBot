@@ -56,6 +56,7 @@ node node_modules/vitest/vitest.mjs run server/group-local-vm.e2e.test.ts server
 ```
 
 The test-only Node loader in `server/testing/group-local-vm-hooks.mjs` replaces
-container status and advances lease/watchdog time inside that child process.
+container status and controls lease expiry and watchdog/deadline timing inside
+that child process.
 Production launchers never import it. No provider or live desktop is used by
 these regression tests; the opt-in Podman acceptance above covers real routing.

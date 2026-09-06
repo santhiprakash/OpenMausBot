@@ -159,7 +159,7 @@ describe("Group Local VM ownership on the real isolated server", () => {
     vmState({ timeout: failure === "timeout" });
     await send(group.id);
     const c = computer(await dump());
-    if (failure === "stall") vmState({ watchOffset: 31 * 60_000 });
+    if (failure === "stall") vmState({ stall: true });
     await idle(bots[0].id);
     expect((await gate(c)).status).toBe(401);
     // Mode changes reject stale localVmActiveThreads even after the bot is idle.

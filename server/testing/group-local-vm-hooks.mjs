@@ -37,12 +37,12 @@ registerHooks({
     if (url.endsWith('/turn-watchdog.ts')) {
       return { ...result, source: `import { readFileSync as readVmWatch } from 'node:fs';\n` +
         String(result.source).replace('this.opts = opts;', 'this.opts = { ...opts, checkMs: 30 };')
-          .replace('Date.now()', `(Date.now() + (JSON.parse(readVmWatch(${JSON.stringify(state)}, 'utf8')).watchOffset || 0))`) };
+          .replace('at - turn.lastEventAt < this.opts.stallMs', `at - turn.lastEventAt < (JSON.parse(readVmWatch(${JSON.stringify(state)}, 'utf8')).stall ? 0 : this.opts.stallMs)`) };
     }
     if (url.endsWith('/room-turn-timeout.ts')) {
       return { ...result, source: `import { readFileSync as readVmDeadline } from 'node:fs';\n` +
         String(result.source).replace('this.remainingMs = roomTurnTimeoutMs(minutes);',
-          `this.remainingMs = JSON.parse(readVmDeadline(${JSON.stringify(state)}, 'utf8')).timeout ? 1500 : roomTurnTimeoutMs(minutes);`) };
+          `this.remainingMs = JSON.parse(readVmDeadline(${JSON.stringify(state)}, 'utf8')).timeout ? 5000 : roomTurnTimeoutMs(minutes);`) };
     }
     return result;
   },
