@@ -140,7 +140,7 @@ struct ConnectedAppsView: View {
                 ForEach(accounts) { account in
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(account.nonemptyAlias ?? "Primary account")
+                            account.nonemptyAlias.map { Text(verbatim: $0) } ?? Text("Primary account")
                             Text(account.status.replacingOccurrences(of: "_", with: " ").capitalized)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
