@@ -8,7 +8,7 @@
 // codex-cli 0.144.4 by agentcal.
 //
 // resumeCursor is the codex thread id; a later turn tries thread/resume
-// and falls back to a fresh thread/start.
+// and preserves that history or reports a failed resume.
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 
@@ -33,6 +33,7 @@ import { codexLocalProviderArgs } from "./local-inject.ts";
 import { augmentedPath, splitCliString } from "../env-path.ts";
 import { classifyError, computeBackoff, RETRY_MAX_ATTEMPTS } from "./retry.ts";
 import { appendNative } from "./native.ts";
+import { codexDeveloperInstructions, syncCodexInstructions } from "./codex-instructions.ts";
 import type { ApprovalMode } from "../../shared/approval-mode.ts";
 
 export { decodeCodexSelection, readCodexModelCatalog, STATIC_CODEX_MODELS } from "./codex-catalog.ts";
@@ -355,15 +356,21 @@ function permissionProfileUnsupported(error: unknown): boolean {
   return /(?:experimental api|invalid params|unknown field|unknown.*permissions|permissions.*(?:unsupported|sandbox)|cannot.*permissions)/i.test(message);
 }
 
-/** Keep private host paths out of diagnostics while preserving enough of the
- * app-server input shape to debug image delivery. The unmodified request is
+/** Keep native instructions and private host paths out of diagnostics while
+ * preserving enough of the input shape to debug delivery. The unmodified request is
  * still written to the provider immediately after this log copy is made. */
 function codexNativeLogMessage(message: unknown): unknown {
   if (!message || typeof message !== "object" || Array.isArray(message)) return message;
   const record = message as Record<string, unknown>;
-  if (record.method !== "turn/start") return message;
   const params = record.params;
   if (!params || typeof params !== "object" || Array.isArray(params)) return message;
+  if (record.method === "thread/start" || record.method === "thread/resume") {
+    return { ...record, params: { ...params, developerInstructions: "[developer instructions omitted]" } };
+  }
+  if (record.method === "thread/inject_items") {
+    return { ...record, params: { ...params, items: "[developer instruction update omitted]" } };
+  }
+  if (record.method !== "turn/start") return message;
   const input = (params as Record<string, unknown>).input;
   if (!Array.isArray(input)) return message;
   return {
@@ -967,25 +974,27 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           capabilities: { experimentalApi: true },
         });
         send({ jsonrpc: "2.0", method: "initialized", params: {} });
+        // developerInstructions replaces, rather than appends to, native
+        // config. Read it for every approval mode so existing rules survive.
+        // request() already redacts config/read responses from native logs.
+        let effectiveConfig: unknown;
+        try {
+          const configured = await request("config/read", {
+            cwd: turn.cwd ?? homedir(),
+            includeLayers: false,
+          });
+          effectiveConfig = configured?.config;
+        } catch {
+          // Do not expose a possibly secret-bearing native config error or
+          // overwrite unknown instructions with an empty fallback.
+          throw new Error("Could not read Codex configuration; cannot safely update bot instructions. Retry after checking Codex.");
+        }
+        const developerInstructions = codexDeveloperInstructions(effectiveConfig, turn.system ?? "");
         let approvalParams: CodexApprovalParams;
         if (approvalMode === "custom") {
           // config/read returns the effective global + project config for this
           // cwd. Reasserting those values is essential: simply omitting them
           // on a resumed thread would keep the previous named mode sticky.
-          let effectiveConfig: unknown;
-          try {
-            const configured = await request("config/read", {
-              cwd: turn.cwd ?? homedir(),
-              includeLayers: false,
-            });
-            effectiveConfig = configured?.config;
-          } catch {
-            // Older app-servers and transient failures cannot prove the
-            // user's configured sandbox. Fall back to interactive read-only
-            // instead of inheriting stale Full or silently broadening a
-            // possibly read-only config to workspace write.
-            effectiveConfig = {};
-          }
           approvalParams = customApprovalParams(effectiveConfig);
         } else {
           approvalParams = namedApprovalParams(approvalMode);
@@ -995,6 +1004,9 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         // mode may synthesize approvals; Custom must preserve the sandbox
         // boundary from config.toml (for example never + read-only).
         autoAcceptPermissions = approvalMode === "full";
+        // Each turn launches a new app-server. Reassert current bot instructions
+        // on start AND resume so Codex owns their lifetime through compaction.
+        // Removed bot rules are cleared without dropping native configured rules.
         const cursor = typeof turn.resumeCursor === "string" ? turn.resumeCursor : null;
         let codexThreadId: string | null = null;
         let startedModel: string | null = null;
@@ -1002,6 +1014,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           try {
             const resumed = await request("thread/resume", {
               threadId: cursor,
+              developerInstructions,
               ...approvalParams.thread,
             });
             codexThreadId = resumed?.thread?.id ?? cursor;
@@ -1011,22 +1024,21 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
               // profile selector. Retry the same resume safely rather than
               // losing the native thread or inheriting its previous mode.
               approvalParams = approvalParams.fallback;
-              try {
-                const resumed = await request("thread/resume", {
-                  threadId: cursor,
-                  ...approvalParams.thread,
-                });
-                codexThreadId = resumed?.thread?.id ?? cursor;
-              } catch {
-                /* thread gone or resume unsupported — start fresh below */
-              }
+              const resumed = await request("thread/resume", {
+                threadId: cursor,
+                developerInstructions,
+                ...approvalParams.thread,
+              });
+              codexThreadId = resumed?.thread?.id ?? cursor;
+            } else {
+              throw error;
             }
-            /* thread gone or resume unsupported — start fresh below */
           }
         }
         if (!codexThreadId) {
           const selection = decodeCodexSelection(turn.model);
           const startThread = () => request("thread/start", {
+              developerInstructions,
               cwd: turn.cwd ?? homedir(),
               model: selection.model,
               ...(selection.modelProvider ? { modelProvider: selection.modelProvider } : {}),
@@ -1044,8 +1056,10 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           codexThreadId = started?.thread?.id ?? null;
           startedModel = started?.model ?? null;
         }
+        if (!codexThreadId) throw new Error("Codex did not return a native thread id");
+        await syncCodexInstructions(threadId, codexThreadId, developerInstructions, Boolean(cursor), request);
         emit({ ...base(threadId, turnId), type: "session.started", sessionId: codexThreadId, model: startedModel ?? turn.model ?? null });
-        const promptText = turn.system ? `${turn.system}\n\n${turn.text}` : turn.text;
+        const promptText = turn.text;
         const turnInput = [
           ...(promptText ? [{ type: "text" as const, text: promptText }] : []),
           ...(turn.images ?? []).map((image) => ({ type: "localImage" as const, path: image.path })),

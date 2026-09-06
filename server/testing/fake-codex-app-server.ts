@@ -133,6 +133,7 @@ process.stdin.on("data", (chunk) => {
         break;
       case "config/read":
         if (mode === "config-read-error") {
+          dump();
           out({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: "config unavailable" } });
           break;
         }
@@ -140,7 +141,8 @@ process.stdin.on("data", (chunk) => {
           jsonrpc: "2.0",
           id: msg.id,
           result: {
-            config: mode === "config-profile" || mode === "config-profile-unsupported"
+            config: {
+              ...(mode === "config-profile" || mode === "config-profile-unsupported"
               ? {
                   default_permissions: "private-operator-profile",
                   permissions: {
@@ -158,7 +160,9 @@ process.stdin.on("data", (chunk) => {
                   mcp_servers: {
                     harmless_name: { env: { DISPLAY_LABEL: "innocuous-config-secret-7a9c" } },
                   },
-                },
+                }),
+              developer_instructions: process.env.FAKE_CODEX_INSTRUCTIONS ?? null,
+            },
             origins: {},
           },
         });
@@ -166,11 +170,19 @@ process.stdin.on("data", (chunk) => {
       case "thread/resume":
         if (msg.params?.permissions && (!experimentalApi || mode === "config-profile-unsupported")) {
           out({ jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: "experimental API required for permissions" } });
-        } else if (mode === "resume" || mode === "config-profile" || mode === "config-profile-unsupported") {
+        } else if (mode === "resume" || mode === "instructions-unsupported" || mode === "config-profile" || mode === "config-profile-unsupported") {
           out({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: msg.params?.threadId } } });
         } else {
           out({ jsonrpc: "2.0", id: msg.id, error: { code: -1, message: "no such thread" } });
         }
+        break;
+      case "thread/inject_items":
+        if (mode === "instructions-unsupported") {
+          dump();
+          out({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } });
+          break;
+        }
+        out({ jsonrpc: "2.0", id: msg.id, result: {} });
         break;
       case "thread/start":
         if (msg.params?.permissions && (!experimentalApi || mode === "config-profile-unsupported")) {
