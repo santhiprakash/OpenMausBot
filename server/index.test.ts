@@ -1895,6 +1895,30 @@ describe("harness HTTP API", () => {
     expect(after.body.bots.find((b: { id: string }) => b.id === bot.id)).toBeUndefined();
   });
 
+  it("broadcasts browser install start, Chrome failure, and a clean retry with the binary present", async () => {
+    const failureMarker = join(home, "browser-clear-fails");
+    const stream = await openSse(`${BASE}/api/events`);
+    try {
+      writeFileSync(failureMarker, "fail");
+      expect((await api("POST", "/api/browser-engine/install")).status).toBe(202);
+      const start = await stream.until((frame) => frame.kind === "config" && frame.browserEngine?.installing === true);
+      expect(start.browserEngine).toMatchObject({ kind: "engine", installing: true });
+      expect(start.browserEngine).not.toHaveProperty("installError");
+      const failed = await stream.until((frame) => frame.kind === "config" && frame.browserEngine?.installError);
+      expect(failed.browserEngine).toMatchObject({ kind: "engine", installError: expect.stringMatching(/install exited 1/) });
+      expect(failed.browserEngine.installing).not.toBe(true);
+      rmSync(failureMarker);
+      stream.frames.splice(0);
+      expect((await api("POST", "/api/browser-engine/install")).status).toBe(202);
+      const retry = await stream.until((frame) => frame.kind === "config" && frame.browserEngine?.installing === true);
+      expect(retry.browserEngine).not.toHaveProperty("installError");
+      await stream.until((frame) => frame.kind === "config" && frame.browserEngine?.kind === "engine" && !frame.browserEngine.installing && !frame.browserEngine.installError);
+    } finally {
+      rmSync(failureMarker, { force: true });
+      stream.close();
+    }
+  });
+
   it.each([
     ["bot", "key-write"], ["bot", "engine-exit"],
     ["profile", "key-write"], ["profile", "engine-exit"],

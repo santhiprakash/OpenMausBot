@@ -45,4 +45,15 @@ describe("Browser panel installation access", () => {
     expect(render({ features: { browser: true }, browserEngine: { kind: "unavailable", installable: false } })).not.toContain("Browser engine not installed");
     expect(render({ features: { browser: true }, browserEngine: { kind: "engine" } })).toContain("has its own browser");
   });
+
+  it("keeps Chrome setup failure and progress visible even when the binary exists", () => {
+    const failed = render({ features: { browser: true }, browserEngine: { kind: "engine", installError: "Chrome download failed" } });
+    expect(failed).toContain("Chrome download failed");
+    expect(failed).toContain("Retry browser installation");
+    expect(failed).not.toContain("has its own browser");
+    const installing = render({ features: { browser: true }, browserEngine: { kind: "engine", installing: true } });
+    expect(installing).toContain("Installing…");
+    expect(installing).toContain('disabled=""');
+    expect(installing).not.toContain("has its own browser");
+  });
 });

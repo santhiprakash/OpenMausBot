@@ -33,7 +33,7 @@ export function BrowserPanel({ bot }: { bot: Bot }) {
     }
   };
 
-  if (engine?.kind === "engine") {
+  if (engine?.kind === "engine" && !installing && !engine.installError && !error) {
     return (
       <div className="flex min-h-0 flex-1 flex-col items-start justify-center gap-2 rounded-xl bg-card p-5">
         <div className="text-[15px] font-medium text-ink">{bot.name} has its own browser</div>
@@ -47,16 +47,18 @@ export function BrowserPanel({ bot }: { bot: Bot }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col items-start justify-center gap-3 rounded-xl bg-card p-5">
-      <div className="text-[15px] font-medium text-ink">Browser engine not installed</div>
-      <p className="text-[13px] leading-relaxed text-ink-secondary">{browserUnavailableReason(state.config)}</p>
-      {engine?.installable ? (
+      <div className="text-[15px] font-medium text-ink">{engine?.kind === "engine" ? "Browser installation incomplete" : "Browser engine not installed"}</div>
+      <p className="text-[13px] leading-relaxed text-ink-secondary">{engine?.kind === "engine"
+        ? "agent-browser is installed, but Chrome setup has not finished. Retry the browser installation."
+        : browserUnavailableReason(state.config)}</p>
+      {engine?.installable || engine?.kind === "engine" ? (
         <button
           type="button"
           onClick={() => void install()}
           disabled={installing}
           className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-white disabled:opacity-60"
         >
-          {installing ? "Installing… (a one-time download of about 160 MB)" : "Install the browser engine"}
+          {installing ? "Installing… (a one-time download of about 160 MB)" : engine?.kind === "engine" ? "Retry browser installation" : "Install the browser engine"}
         </button>
       ) : null}
       {engine?.installError ? (
