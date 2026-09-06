@@ -4,5 +4,15 @@
   "engines.cloud": "Nube",
   "engines.local": "Local",
   "common.checkAgain": "Comprobar de nuevo",
-  "common.checking": "Comprobando…"
+  "common.checking": "Comprobando…",
+  "approval.held.native": "El proveedor requiere tu aprobación para esta acción.",
+  "approval.held.sandbox": "Esto cambia el sandbox del proveedor, así que solo Full access puede aprobarlo automáticamente.",
+  "approval.held.localComputer": "Controlar tu computadora nunca está cubierto por «Permitir siempre», así que esto necesita tu decisión.",
+  "approval.held.unattended": "Un webhook u otro bot inició este turno, así que Approve for me está en pausa y todas las acciones preguntan.",
+  "approval.held.unattendedFullAccess": "Un webhook u otro bot inició este turno, así que Approve for me está en pausa y todas las acciones preguntan. Full access sigue funcionando sin supervisión.",
+  "approval.held.destructive": "Esto parece destructivo, así que Approve for me se detuvo para preguntar.",
+  "approval.held.sensitive": "Esto toca credenciales, así que Approve for me se detuvo para preguntar.",
+  "approval.held.needsYou": "Esta acción te necesita, así que Approve for me se detuvo para preguntar.",
+  "approval.held.undeliveredFull": "Full access no pudo entregar esta aprobación.",
+  "approval.held.undelivered": "Approve for me no pudo responder a esta."
 }

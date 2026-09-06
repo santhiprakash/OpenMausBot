@@ -275,26 +275,66 @@ export function approvalHeldReason(context: {
   /** Suppress the Full access hint on providers that cannot offer it. */
   fullAccessAvailable: boolean;
 }): string | undefined {
-  if (context.source === "native-approval") return "The provider requires your approval for this action.";
+  const key = approvalHeldNote(context);
+  return key && HELD_NOTE[key];
+}
+
+/** Every fixed note a held card can show, by catalog key.
+ *
+ * The card is the last thing between a bot and someone's filesystem, so the
+ * one line explaining why it stopped should not be the one line still in
+ * English. The client translates by key and falls back to this text, which
+ * the server keeps sending: cards saved before the key existed still render,
+ * and so do the free-text apply errors that have no key at all.
+ *
+ * The unattended hint is a whole second sentence rather than a suffix. A
+ * translator needs the sentence, not two halves to reassemble. */
+export const HELD_NOTE = {
+  "approval.held.native": "The provider requires your approval for this action.",
+  "approval.held.sandbox":
+    "This changes the provider sandbox, so only Full access can approve it automatically.",
+  "approval.held.localComputer":
+    "Controlling your computer is never covered by Always allow, so this needs you.",
+  "approval.held.unattended":
+    "A webhook or another bot started this turn, so Approve for me is paused and every action asks.",
+  "approval.held.unattendedFullAccess":
+    "A webhook or another bot started this turn, so Approve for me is paused and every action asks. Full access keeps working unattended.",
+  "approval.held.destructive": "This looks destructive, so Approve for me stopped to ask.",
+  "approval.held.sensitive": "This touches credentials, so Approve for me stopped to ask.",
+  "approval.held.needsYou": "This action needs you, so Approve for me stopped to ask.",
+  "approval.held.undeliveredFull": "Full access couldn't deliver this approval.",
+  "approval.held.undelivered": "Approve for me couldn't answer this one.",
+} as const;
+
+export type HeldNoteKey = keyof typeof HELD_NOTE;
+
+/** Which note, as a key. approvalHeldReason is this plus the English text, so
+ * the branching that decides the note lives in exactly one place. */
+export function approvalHeldNote(context: {
+  source?: AutoVerdictSource;
+  permission: boolean;
+  requiresExplicitApproval?: boolean;
+  mode: ApprovalMode;
+  unattended: boolean;
+  fullAccessAvailable: boolean;
+}): HeldNoteKey | undefined {
+  if (context.source === "native-approval") return "approval.held.native";
   if (!context.permission) return undefined;
-  if (context.requiresExplicitApproval) {
-    return "This changes the provider sandbox, so only Full access can approve it automatically.";
-  }
+  if (context.requiresExplicitApproval) return "approval.held.sandbox";
   // Host control reaches this only over a grant that would otherwise have
   // fired, in a mode that explains nothing else. "I pressed Always allow and
   // it asked anyway" is the whole confusion, so answer that and not the mode.
-  if (context.source === "local-computer-block") {
-    return "Controlling your computer is never covered by Always allow, so this needs you.";
-  }
+  if (context.source === "local-computer-block") return "approval.held.localComputer";
   if (context.mode !== "auto") return undefined;
   if (context.unattended) {
-    const hint = context.fullAccessAvailable ? " Full access keeps working unattended." : "";
-    return `A webhook or another bot started this turn, so Approve for me is paused and every action asks.${hint}`;
+    return context.fullAccessAvailable
+      ? "approval.held.unattendedFullAccess"
+      : "approval.held.unattended";
   }
   // A guard names itself. Both stop the same mode, but one is about damage
   // and the other about secrets, and a read-only .env card that says
   // "destructive" teaches people to stop reading these.
-  if (context.source === "destructive-guard") return "This looks destructive, so Approve for me stopped to ask.";
-  if (context.source === "sensitive-guard") return "This touches credentials, so Approve for me stopped to ask.";
-  return "This action needs you, so Approve for me stopped to ask.";
+  if (context.source === "destructive-guard") return "approval.held.destructive";
+  if (context.source === "sensitive-guard") return "approval.held.sensitive";
+  return "approval.held.needsYou";
 }

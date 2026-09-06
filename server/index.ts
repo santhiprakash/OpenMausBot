@@ -27,7 +27,7 @@ import {
   type CredentialTargetId,
 } from "../shared/credential-request.ts";
 
-import { approvalHeldReason, approvalModeForOrigin, autoVerdict, rememberableApprovalKey } from "./auto-approve.ts";
+import { HELD_NOTE, approvalHeldNote, approvalHeldReason, approvalModeForOrigin, autoVerdict, rememberableApprovalKey } from "./auto-approve.ts";
 import { requestReview, resolveAutoReviewMode, shouldReview } from "./auto-review.ts";
 import { updateClaudeCli } from "./claude-update.ts";
 import {
@@ -2957,9 +2957,12 @@ bus.subscribe((event: RuntimeEvent) => {
                   scope: event.approvalScope,
                   requiresExplicitApproval: event.requiresExplicitApproval,
                 }),
-                held: verdict.source === "full-access"
-                  ? "Full access couldn't deliver this approval."
-                  : "Approve for me couldn't answer this one.",
+                held: HELD_NOTE[verdict.source === "full-access"
+                  ? "approval.held.undeliveredFull"
+                  : "approval.held.undelivered"],
+                heldCode: verdict.source === "full-access"
+                  ? "approval.held.undeliveredFull"
+                  : "approval.held.undelivered",
                 approvalScope: event.approvalScope,
               },
             });
@@ -2979,6 +2982,18 @@ bus.subscribe((event: RuntimeEvent) => {
         })();
         break;
       }
+      // A card can outlive the bot record that raised it. Without one there is
+      // no mode to explain, but the sandbox note still applies.
+      const heldContext = {
+        source: verdict?.source,
+        permission,
+        requiresExplicitApproval: event.requiresExplicitApproval,
+        mode: asker ? approvalModeForOrigin(approvalModeFor(asker), { peerInitiated: isInternalTurn(event.threadId) }) : ("ask" as const),
+        unattended: Boolean(unattended),
+        fullAccessAvailable: asker && !isInternalTurn(event.threadId)
+          ? supportsApprovalMode(registry.cliTarget(asker.modelSelection.instanceId)?.driverKind, "full")
+          : false,
+      };
       const message = pushMessage({
         role: "bot",
         kind: "options",
@@ -3002,18 +3017,10 @@ bus.subscribe((event: RuntimeEvent) => {
                 requiresExplicitApproval: event.requiresExplicitApproval,
               })
             : undefined,
-          // A card can outlive the bot record that raised it. Without one
-          // there is no mode to explain, but the sandbox note still applies.
-          held: approvalHeldReason({
-            source: verdict?.source,
-            permission,
-            requiresExplicitApproval: event.requiresExplicitApproval,
-            mode: asker ? approvalModeForOrigin(approvalModeFor(asker), { peerInitiated: isInternalTurn(event.threadId) }) : "ask",
-            unattended: Boolean(unattended),
-            fullAccessAvailable: asker && !isInternalTurn(event.threadId)
-              ? supportsApprovalMode(registry.cliTarget(asker.modelSelection.instanceId)?.driverKind, "full")
-              : false,
-          }),
+          // The text stays for cards saved before heldCode existed, and for
+          // clients that do not know the key yet.
+          held: approvalHeldReason(heldContext),
+          heldCode: approvalHeldNote(heldContext),
           approvalScope: event.approvalScope,
         },
       });

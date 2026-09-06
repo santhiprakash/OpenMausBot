@@ -4,7 +4,11 @@
 // question is never answered by the machine.
 import { describe, expect, it } from "vitest";
 
+import englishCatalog from "../src/locales/en.json" with { type: "json" };
+
 import {
+  HELD_NOTE,
+  approvalHeldNote,
   approvalHeldReason,
   approvalKey,
   approvalModeForOrigin,
@@ -13,6 +17,7 @@ import {
   looksDestructive,
   looksSensitive,
   rememberableApprovalKey,
+  type AutoVerdictSource,
 } from "./auto-approve.ts";
 
 describe("native permission decisions", () => {
@@ -364,5 +369,50 @@ describe("approvalHeldReason over a real verdict", () => {
     expect(sensitive.text).not.toBe(destructive.text);
     expect(sensitive.text).not.toContain("destructive");
     expect(destructive.text).toContain("destructive");
+  });
+});
+
+// The card's note is picked server-side but rendered in the reader's
+// language, so the key and the English must not drift apart — from each
+// other, or from the catalog the client actually ships.
+describe("held notes are translatable", () => {
+  const auto = { permission: true, mode: "auto" as const, fullAccessAvailable: true };
+  const sources: (AutoVerdictSource | undefined)[] = [
+    undefined, "native-approval", "destructive-guard", "sensitive-guard",
+    "local-computer-block", "unattended-block", "no-grant", "always-allow",
+  ];
+  const contexts = sources.flatMap((source) =>
+    [true, false].flatMap((unattended) =>
+      [true, false].flatMap((fullAccessAvailable) =>
+        [true, false].flatMap((permission) =>
+          [true, false].flatMap((requiresExplicitApproval) =>
+            (["ask", "auto", "full", "custom"] as const).map((mode) => ({
+              ...auto, source, unattended, fullAccessAvailable, permission,
+              requiresExplicitApproval, mode,
+            })),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  it("gives every note a key, and every key that note's exact text", () => {
+    for (const context of contexts) {
+      const key = approvalHeldNote(context);
+      expect(approvalHeldReason(context)).toBe(key ? HELD_NOTE[key] : undefined);
+    }
+  });
+
+  it("reaches every key the catalog carries, so none is dead copy", () => {
+    const reached = new Set(contexts.map((context) => approvalHeldNote(context)).filter(Boolean));
+    // the two delivery-failure notes are raised at the call site, not here
+    const raisedElsewhere = ["approval.held.undelivered", "approval.held.undeliveredFull"];
+    expect([...reached, ...raisedElsewhere].sort()).toEqual(Object.keys(HELD_NOTE).sort());
+  });
+
+  it("ships each note in the English catalog under the same key", () => {
+    for (const [key, text] of Object.entries(HELD_NOTE)) {
+      expect(englishCatalog[key as keyof typeof englishCatalog]).toBe(text);
+    }
   });
 });

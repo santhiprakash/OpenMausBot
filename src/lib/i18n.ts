@@ -24,6 +24,14 @@ export function setLocale(tag: string | undefined): string {
 let activePack: LocalePack = en;
 setLocale(globalThis.navigator?.language);
 
+/** Translate a key the server chose rather than the renderer — the note a
+ * held approval card shows. A key this build does not know (an older client
+ * meeting a newer server, or a card saved before the key existed) falls back
+ * to the English the server sends beside it, so the note always reads. */
+export function tFromServer(key: string | undefined, fallback: string | undefined): string | undefined {
+  return key && key in en ? t(key as LocaleKey) : fallback;
+}
+
 /** Look up a catalog string. `{name}` placeholders interpolate from params;
  * a placeholder without a matching param stays verbatim so a bad pack shows
  * its seams instead of dropping words. */
