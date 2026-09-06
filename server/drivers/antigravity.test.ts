@@ -2,12 +2,13 @@ import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirS
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ensureDirs } from "../config.ts";
 import type { ProviderInstance } from "../contracts.ts";
 import { recordEvents, type EventRecorder } from "../testing/events.ts";
 import { removeTempDir } from "../testing/cleanup.ts";
+import * as procs from "../procs.ts";
 import {
   ANTIGRAVITY_AUTH_PREFIX,
   AntigravityAcpClient,
@@ -21,6 +22,7 @@ import {
   prepareAntigravityProfile,
   probeAntigravityModels,
   validateAntigravityCallbackUrl,
+  validateAntigravityRuntime,
 } from "./antigravity-acp.ts";
 import {
   ANTIGRAVITY_RELEASE_VERSION,
@@ -56,6 +58,8 @@ function fakeRuntime(startupDelayMs = 0): { directory: string; executable: strin
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   delete process.env.FAKE_ACP_AUTH_METHOD;
   delete process.env.FAKE_ACP_MODELS;
   delete process.env.FAKE_ACP_MODES;
@@ -137,6 +141,26 @@ createInterface({ input: process.stdin }).on('line', line => {
 });
 
 describe("stopping the runtime before touching its files", () => {
+  it("validates a real fake runtime and waits for its process to close before returning", async () => {
+    const fake = fakeRuntime();
+    const runtime = await resolveAntigravityRuntime(fake.executable);
+    vi.stubEnv("FAKE_ACP_AGENT_NAME", "Google Antigravity");
+    vi.stubEnv("FAKE_ACP_AGENT_VERSION", "1.1.1");
+    vi.stubEnv("FAKE_ACP_AUTH_METHOD", "oauth-personal");
+    let sawClose = false;
+    const spawn = procs.spawnCli;
+    const spawned = vi.spyOn(procs, "spawnCli").mockImplementation((...args) => {
+      const child = spawn(...args);
+      child.once("close", () => { sawClose = true; });
+      return child;
+    });
+    await validateAntigravityRuntime(runtime, "agy_acp_server_1.1.1");
+    expect(spawned).toHaveBeenCalledTimes(1);
+    expect(sawClose).toBe(true);
+    const child = spawned.mock.results[0]!.value;
+    expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
+  });
+
   it("closeAndWait resolves only once the process is gone, so a rename on Windows cannot hit a running executable", async () => {
     const fake = fakeRuntime();
     const runtime = await resolveAntigravityRuntime(fake.executable);
@@ -379,9 +403,14 @@ describe("official Antigravity runtime", () => {
     })).rejects.toThrow(/redirected outside/u);
   });
 
-  it("coalesces, verifies, extracts, and reuses a pinned managed download", async () => {
+  it("coalesces, verifies, extracts, and reuses a pinned download without touching another install", async () => {
     const baseDir = mkdtempSync(join(tmpdir(), "omb-antigravity-install-"));
     scratch.push(baseDir);
+    const versions = join(baseDir, "tools", "antigravity-acp", `${process.platform}-${process.arch}`, "versions");
+    const otherStaging = join(versions, ".install-other-active", "runtime");
+    mkdirSync(otherStaging, { recursive: true });
+    const otherFile = join(otherStaging, "agy_acp_server.exe");
+    writeFileSync(otherFile, "another app process is still installing");
     const archive = Buffer.from(
       "UEsDBBQAAAAIAMaAI13ihkXDEwAAABEAAAASAAAAYWd5X2FjcF9zZXJ2ZXIucGFyU1bUT8rM0y/O4EqtyCxRMOACAFBLAwQUAAAACADGgCNd4oZFwxMAAAARAAAAFQAAAGxvY2FsaGFybmVzc19leHRlcm5hbFNW1E/KzNMvzuBKrcgsUTDgAgBQSwECFAMUAAAACADGgCNd4oZFwxMAAAARAAAAEgAAAAAAAAAAAAAAgAEAAAAAYWd5X2FjcF9zZXJ2ZXIucGFyUEsBAhQDFAAAAAgAxoAjXeKGRcMTAAAAEQAAABUAAAAAAAAAAAAAAIABQwAAAGxvY2FsaGFybmVzc19leHRlcm5hbFBLBQYAAAAAAgACAIMAAACJAAAAAAA=",
       "base64",
@@ -413,6 +442,8 @@ describe("official Antigravity runtime", () => {
     await installAntigravityRuntime(options);
     expect(fetches).toBe(1);
     expect(validations).toBe(2);
+    expect(readFileSync(otherFile, "utf8")).toBe("another app process is still installing");
+    expect(readdirSync(versions).filter((name) => name.startsWith(".install-"))).toEqual([".install-other-active"]);
   });
 
   it("isolates profiles by instance and strips ambient Google credentials", async () => {

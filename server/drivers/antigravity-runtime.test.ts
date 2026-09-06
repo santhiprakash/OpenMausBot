@@ -1,16 +1,8 @@
-import { mkdirSync, mkdtempSync, writeFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import { removeTempDir } from "../testing/cleanup.ts";
-import { retryOnWindowsFileLock, sweepStaleStaging, transientWindowsFileError } from "./antigravity-runtime.ts";
+import { retryOnWindowsFileLock, transientWindowsFileError } from "./antigravity-runtime.ts";
 
 const withCode = (code: string) => Object.assign(new Error(code), { code });
-const scratch: string[] = [];
-afterEach(async () => {
-  for (const dir of scratch.splice(0)) await removeTempDir(dir);
-});
 
 describe("installing the Antigravity runtime on Windows", () => {
   it("knows the refusals Windows gives for a file something still holds open", () => {
@@ -60,19 +52,4 @@ describe("installing the Antigravity runtime on Windows", () => {
     expect(delays).toEqual([250, 500, 1000, 2000, 2000, 2000, 2000]);
   });
 
-  it("sweeps leftover .install- folders from earlier attempts and nothing else", async () => {
-    const versions = mkdtempSync(join(tmpdir(), "omb-antigravity-versions-"));
-    scratch.push(versions);
-    mkdirSync(join(versions, ".install-old-1", "runtime"), { recursive: true });
-    writeFileSync(join(versions, ".install-old-1", "runtime", "agy_acp_server.exe"), "x");
-    mkdirSync(join(versions, ".install-old-2"));
-    mkdirSync(join(versions, "abc123"));
-    writeFileSync(join(versions, "abc123", ".install-complete.json"), "{}");
-    const removed = await sweepStaleStaging(versions);
-    expect(removed).toBe(2);
-    expect(existsSync(join(versions, ".install-old-1"))).toBe(false);
-    expect(existsSync(join(versions, ".install-old-2"))).toBe(false);
-    expect(existsSync(join(versions, "abc123", ".install-complete.json"))).toBe(true);
-    expect(await sweepStaleStaging(join(versions, "does-not-exist"))).toBe(0);
-  });
 });

@@ -189,8 +189,8 @@ export class AntigravityAcpClient {
         if (!this.closed) this.failAll(new Error(`Antigravity ACP exited ${code ?? "unexpectedly"}.`));
         resolve();
       });
-      // A spawn failure emits `error` and then `close`, but not always `exit`.
-      this.child.once("error", () => resolve());
+      // Failed spawns also emit `close`. An `error` alone can instead mean
+      // a failed kill, and is not evidence that the runtime stopped.
     });
   }
 
@@ -484,26 +484,45 @@ export function isValidAntigravityInitializeResult(
  */
 export async function validateAntigravityRuntime(runtime: AntigravityRuntime, expectedVersion: string): Promise<void> {
   const profileDirectory = await mkdtemp(join(tmpdir(), "openmaus-antigravity-verify-"));
+  let client: AntigravityAcpClient | undefined;
+  let failed = false;
+  let failure: unknown;
   try {
     const profile = await prepareAntigravityProfile({
       instanceId: `verify-${randomUUID()}`,
       runtime,
       profileDirectory,
     });
-    const client = new AntigravityAcpClient(runtime, profile, profileDirectory);
-    try {
-      const initialized = await client.initialize();
-      if (!isValidAntigravityInitializeResult(initialized, expectedVersion)) {
-        throw new Error("The download did not identify as the expected Google Antigravity ACP release.");
-      }
-    } finally {
-      // The caller is about to rename the directory this executable runs
-      // from; on Windows that fails with EPERM while the process lives.
-      await client.closeAndWait();
+    client = new AntigravityAcpClient(runtime, profile, profileDirectory);
+    const initialized = await client.initialize();
+    if (!isValidAntigravityInitializeResult(initialized, expectedVersion)) {
+      throw new Error("The download did not identify as the expected Google Antigravity ACP release.");
     }
-  } finally {
-    await rm(profileDirectory, { recursive: true, force: true });
+  } catch (error) {
+    failed = true;
+    failure = error;
   }
+  // The caller is about to rename the directory this executable runs from.
+  // Neither it nor the profile is safe to touch before confirmed close.
+  let stopped = !client;
+  try {
+    if (client) {
+      stopped = await client.closeAndWait();
+      if (!stopped) throw new Error("Antigravity did not shut down after runtime verification.");
+    }
+  } catch (error) {
+    if (!failed) {
+      failed = true;
+      failure = error;
+    }
+  }
+  if (stopped) {
+    await rm(profileDirectory, { recursive: true, force: true, maxRetries: 4, retryDelay: 250 })
+      .catch((error) => {
+        console.warn(`antigravity: could not remove verification profile ${profileDirectory}: ${error instanceof Error ? error.message : String(error)}`);
+      });
+  }
+  if (failed) throw failure;
 }
 
 export interface AntigravityAuthStart {

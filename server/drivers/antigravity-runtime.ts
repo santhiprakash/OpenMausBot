@@ -6,7 +6,6 @@ import {
   mkdir,
   mkdtemp,
   open,
-  readdir,
   readFile,
   rename,
   rm,
@@ -34,7 +33,7 @@ const STAGING_PREFIX = ".install-";
 /** Windows refuses to rename or delete a file something still holds open,
  * with EPERM/EBUSY/EACCES rather than a clear "in use": the runtime the
  * validator just stopped (taskkill is asynchronous) or an antivirus scan of
- * a brand-new executable. Both clear within seconds. */
+ * a brand-new executable. Retry briefly; persistent refusals still fail. */
 export function transientWindowsFileError(error: unknown): boolean {
   const code = typeof error === "object" && error !== null ? Reflect.get(error, "code") : undefined;
   return code === "EPERM" || code === "EBUSY" || code === "EACCES" || code === "ENOTEMPTY";
@@ -64,27 +63,6 @@ export async function retryOnWindowsFileLock<T>(step: () => Promise<T>, options:
   }
 }
 
-/** Best effort: leftovers of installs that died or lost their cleanup race
- * (see the finally block below). Never fails the install that found them. */
-export async function sweepStaleStaging(versions: string, options: { log?: (line: string) => void } = {}): Promise<number> {
-  let removed = 0;
-  let entries: string[];
-  try {
-    entries = await readdir(versions);
-  } catch {
-    return 0;
-  }
-  for (const entry of entries) {
-    if (!entry.startsWith(STAGING_PREFIX)) continue;
-    try {
-      await rm(join(versions, entry), { recursive: true, force: true });
-      removed += 1;
-    } catch (error) {
-      options.log?.(`antigravity: could not remove stale install folder ${entry}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  return removed;
-}
 const INSTALL_RECORD = ".install-complete.json";
 
 export interface AntigravityRuntime {
@@ -412,9 +390,10 @@ async function installOnce(options: AntigravityInstallOptions): Promise<Antigrav
     // extraction checks still fail safely if the disk fills.
   }
 
-  await sweepStaleStaging(versions, { log: (line) => console.warn(line) });
+  // Another app/server process may be installing into this versions folder.
+  // The in-memory coalescing map cannot protect its staging directory.
   const staging = await mkdtemp(join(versions, `${STAGING_PREFIX}${randomUUID()}-`));
-  let failure: unknown = null;
+  let failed = false;
   try {
     const archivePath = join(staging, "download.zip");
     const runtimeDirectory = join(staging, "runtime");
@@ -490,18 +469,18 @@ async function installOnce(options: AntigravityInstallOptions): Promise<Antigrav
     if (!installed) throw new Error("The installed Antigravity runtime is incomplete.");
     return installed;
   } catch (error) {
-    failure = error;
+    failed = true;
     throw error;
   } finally {
     // Cleanup must never replace the real error with its own: a user who
     // saw "EPERM: unlink agy_acp_server.exe" was looking at this line, not
-    // at why the install failed. Retried, then logged and left for the
-    // sweep at the next install.
+    // at why the install failed. Only clean up this attempt's directory;
+    // if it stays locked, log and leave it without touching other attempts.
     try {
       await retryOnWindowsFileLock(() => rm(staging, { recursive: true, force: true }));
     } catch (cleanupError) {
       const detail = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
-      console.warn(`antigravity: could not remove the install folder ${staging} (${detail})${failure ? "" : "; the install itself succeeded"}`);
+      console.warn(`antigravity: could not remove the install folder ${staging} (${detail})${failed ? "" : "; the install itself succeeded"}`);
     }
   }
 }
