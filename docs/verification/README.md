@@ -51,6 +51,9 @@ against an isolated server for image decoding, loading, and recovery UI checks.
 The [bot settings fixture](bot-settings.md) checks profile saves, standing
 instructions, history restore, skill/memory refresh, and stale-response isolation.
 
+The [Group and Goal Local VM recipe](group-local-vm.md) checks per-speaker
+desktop routing, cancellation, and computer authority cleanup.
+
 ## Evidence
 
 The [Japanese desktop font recipe](japanese-desktop.md) checks real Firefox and
