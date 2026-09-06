@@ -29,6 +29,15 @@ struct CompanionApp: App {
                 // leaving it on the phone's own locale, which is what an app
                 // with no language setting would use anyway.
                 .environment(\.locale, AppLanguage.resolved(language).locale ?? .autoupdatingCurrent)
+                // A navigation title is drawn by UIKit, which reads its string
+                // once and does not re-read it when the environment changes —
+                // so the body would switch language while the title above it
+                // stayed behind. Re-identifying the tree on the chosen language
+                // rebuilds that chrome. It costs the navigation stack and any
+                // view state below, which is the right trade for something a
+                // person changes deliberately and almost never. `session` lives
+                // on the App, not here, so the connection survives.
+                .id(language)
                 .onAppear {
                     OpenMausSharedInbox.removeDirectories(olderThan: 60 * 60)
                     session.connect()
