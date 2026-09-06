@@ -169,6 +169,13 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(threadStart.params).toMatchObject({ model: "gpt-5.6-sol", modelProvider: "openai" });
   });
 
+  it("ignores requests received after turn completion", async () => {
+    await create({ mode: "late-request" });
+    await instance.adapter.sendTurn({ threadId: "t-late-request", text: "finish" });
+    await recorder.until((event) => event.type === "turn.completed");
+    expect(recorder.events.some((event) => event.type === "request.opened")).toBe(false);
+  });
+
   it.each([
     ["ask", "on-request", "workspace-write", "workspaceWrite"],
     ["auto", "on-request", "workspace-write", "workspaceWrite"],
