@@ -14,11 +14,21 @@ struct CompanionApp: App {
     @StateObject private var session = Session()
     @Environment(\.scenePhase) private var scenePhase
     @State private var liveActivities = LiveActivityCoordinator()
+    @AppStorage(PrefKey.language) private var language = AppLanguage.system.rawValue
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(session)
+                // One modifier is the whole language seam. SwiftUI resolves a
+                // `LocalizedStringKey` against the environment's locale, so
+                // every `Text("…")`, `Button("…")`, `Section("…")` and
+                // `navigationTitle("…")` already in the app — including the
+                // ones inside sheets and pushed screens — follows this line
+                // without a call site changing. Following the system means
+                // leaving it on the phone's own locale, which is what an app
+                // with no language setting would use anyway.
+                .environment(\.locale, AppLanguage.resolved(language).locale ?? .autoupdatingCurrent)
                 .onAppear {
                     OpenMausSharedInbox.removeDirectories(olderThan: 60 * 60)
                     session.connect()
