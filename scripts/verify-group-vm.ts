@@ -23,10 +23,13 @@ const fixture = await launchVerificationServer(process.env, controller.signal, {
   binDir: dirname(podman), host: connection.URI, sshKey: connection.Identity, staticDir: resolve("dist"),
 });
 async function api(path: string, body?: unknown, method = body === undefined ? "GET" : "POST", cleanup = false): Promise<any> {
+  if (!cleanup) controller.signal.throwIfAborted();
   const timeout = AbortSignal.timeout(120_000);
   const response = await fetch(fixture.info.url + path, {
     method, headers: { "content-type": "application/json" },
-    signal: cleanup ? timeout : AbortSignal.any([controller.signal, timeout]),
+    // Finish an in-flight mutation before cleanup; aborting HTTP does not
+    // cancel the server-side container creation.
+    signal: cleanup || method !== "GET" ? timeout : AbortSignal.any([controller.signal, timeout]),
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   if (!response.ok) throw new Error(`${path}: ${await response.text()}`);

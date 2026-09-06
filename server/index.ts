@@ -2408,7 +2408,9 @@ const watchdog = new TurnWatchdog({
   stallMs: TURN_STALL_MS,
   checkMs: 60_000,
   onStall: (turn) => {
-    const stalledVmTarget = localVmThreadTargets.get(turn.threadId);
+    // Room targets carry an invocation identity; only those claims belong
+    // to the room grace cleanup added here.
+    const stalledVmTarget = groupSpeakers.has(turn.threadId) ? localVmThreadTargets.get(turn.threadId) : undefined;
     void releaseBrowserCapabilityForThread(turn.threadId);
     revokeInternalCapabilitiesForThread(turn.threadId);
     repeats.settle(turn.threadId);
