@@ -381,7 +381,12 @@ process.once("exit", releaseDataDirLeaseAtExit);
 // for this server, the paired sessions, and the cookie the served UI uses.
 const ENVIRONMENT_ID = loadEnvironmentId(DATA_DIR);
 const sessions = new SessionRegistry({ file: join(DATA_DIR, "sessions.json") });
-const SESSION_COOKIE = sessionCookieName(PORT, ENVIRONMENT_ID);
+// Assigned once the port-retry loop below settles PORT: evaluating it here
+// would bake in startPort, so an instance that fell back would key its
+// session cookie on a port it never bound (cookies are not port-scoped, so
+// the name is the only thing separating instances). Every consumer is a
+// request handler, which only runs after the server is listening.
+let SESSION_COOKIE: string;
 const DESKTOP_MANAGED = process.env.OMB_DESKTOP_PARENT === "1";
 // Empty is deliberately a deny-all bootstrap state. Only Electron's private
 // utility-process port can replace it with the per-launch owner capability.
@@ -12942,6 +12947,11 @@ if (!server.listening) {
   }
   throw new Error(`could not find an available port after ${MAX_PORT_ATTEMPTS + 1} attempts starting from ${startPort}`);
 }
+
+// PORT is final here: compute the session-cookie name from the port the
+// server actually bound, before the parent (or anything else) treats the
+// server as ready.
+SESSION_COOKIE = sessionCookieName(PORT, ENVIRONMENT_ID);
 
 utilityParentPort?.postMessage({
   type: "openmausbot:listen",

@@ -138,5 +138,24 @@ describe("server port fallback on EADDRINUSE", () => {
     expect(ingress.available).toBe(true);
     expect(ingress.baseUrl).toBe(`http://${HOST}:${resolvedWebhookPort}`);
     expect(resolvedWebhookPort).toBe(resolvedPort + 1);
+
+    // The advertised webhook listener must actually accept connections,
+    // not only be reported in metadata and boot logs.
+    const webhookHealth = await fetch(`http://${HOST}:${resolvedWebhookPort}/health`, {
+      signal: AbortSignal.timeout(5_000),
+    });
+    expect(webhookHealth.status).toBe(200);
+
+    // The session-cookie name is keyed on the port the server actually
+    // bound, not the configured port that EADDRINUSE skipped. The logout
+    // handler echoes the cookie name in its clearing Set-Cookie header.
+    const logout = await fetch(`http://${HOST}:${resolvedPort}/api/auth/logout`, {
+      method: "POST",
+      signal: AbortSignal.timeout(5_000),
+    });
+    expect(logout.status).toBe(200);
+    const setCookie = logout.headers.get("set-cookie") ?? "";
+    expect(setCookie).toContain(`omb_session_${resolvedPort}_`);
+    expect(setCookie).not.toContain(`omb_session_${basePort}_`);
   });
 });
