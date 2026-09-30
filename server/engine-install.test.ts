@@ -14,7 +14,7 @@ import * as procs from "./procs.ts";
 // itself before anything slower (requires, log writes) can delay boot.
 const FAKE_NPM = `#!/usr/bin/env node
 if (process.env.FAKE_NPM_MODE === 'stubborn') process.on('SIGTERM', () => {});
-const { appendFileSync, mkdirSync, writeFileSync } = require('node:fs');
+const { appendFileSync, existsSync, mkdirSync, writeFileSync } = require('node:fs');
 const { join } = require('node:path');
 const args = process.argv.slice(2);
 const mode = process.env.FAKE_NPM_MODE || 'ok';
@@ -24,8 +24,15 @@ if (mode === 'hang' || mode === 'stubborn') { setInterval(() => {}, 1000); }
 else {
   const prefix = args[args.indexOf('--prefix') + 1];
   if (mode !== 'no-bin') {
+    // broken-bin leaves a shim that cannot run — npm's dropped-optional-dep
+    // failure mode; flaky-bin is the reporter's workaround (a second install
+    // fixes it), so only the first run lays the broken file down.
+    const bin = join(prefix, 'bin', 'fakebin');
+    const broken = mode === 'broken-bin' || (mode === 'flaky-bin' && !existsSync(bin));
     mkdirSync(join(prefix, 'bin'), { recursive: true });
-    writeFileSync(join(prefix, 'bin', 'fakebin'), '#!/bin/sh\\necho fixture\\n', { mode: 0o755 });
+    writeFileSync(bin, broken
+      ? '#!/bin/sh\\necho "Error: Missing optional dependency @fixture/fakebin-linux-x64" >&2\\nexit 1\\n'
+      : '#!/bin/sh\\necho fixture\\n', { mode: 0o755 });
   }
   if (mode === 'slow') setTimeout(() => process.exit(0), 300); else process.exit(0);
 }
@@ -103,6 +110,20 @@ describe.skipIf(process.platform === "win32")("installing with npm", () => {
     expect(failure).toContain("404 Not Found");
     process.env.FAKE_NPM_MODE = "no-bin";
     await expect(installNpmEngine("fake-engine", { baseDir: base, cli: "fakebin" })).rejects.toThrow("did not provide a `fakebin` command");
+  });
+
+  it("retries once and fails clearly when the installed CLI cannot run", async () => {
+    process.env.FAKE_NPM_MODE = "broken-bin";
+    const failure = await installNpmEngine("fake-engine", { baseDir: base, cli: "fakebin" }).catch((error: Error) => error.message);
+    expect(failure).toContain("does not run");
+    expect(failure).toContain("Missing optional dependency");
+    expect(calls()).toHaveLength(2);
+  });
+
+  it("succeeds when the retry fixes a CLI the first install left broken", async () => {
+    process.env.FAKE_NPM_MODE = "flaky-bin";
+    await installNpmEngine("fake-engine", { baseDir: base, cli: "fakebin" });
+    expect(calls()).toHaveLength(2);
   });
 
   it("stops an install that hangs", async () => {

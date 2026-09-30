@@ -14,6 +14,9 @@ import { killCliTree, spawnCli } from "./procs.ts";
 
 const MAX_OUTPUT = 64 * 1024;
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
+/** A `--version` probe is fast when the CLI is real; a hung shim still cannot
+ * hold the install answer hostage. */
+const VERSION_TIMEOUT_MS = 30_000;
 
 /** npm's global prefix for engines the app installs itself. */
 export function enginesPrefix(baseDir = DATA_DIR): string {
@@ -97,11 +100,74 @@ async function installOnce(pkg: string, options: InstallOptions): Promise<void> 
   registerPathDir(enginesBinDir(options.baseDir));
   resetPathCache();
   if (options.cli) {
+    const cli = options.cli;
     const binDir = enginesBinDir(options.baseDir);
-    if (!findCliCandidates(options.cli).some((path) => path.startsWith(binDir))) {
-      throw new Error(`${pkg} installed, but it did not provide a \`${options.cli}\` command. Check the package name in this engine's install descriptor.`);
+    const installed = () => findCliCandidates(cli).find((path) => path.startsWith(binDir));
+    let cliPath = installed();
+    if (!cliPath) {
+      throw new Error(`${pkg} installed, but it did not provide a \`${cli}\` command. Check the package name in this engine's install descriptor.`);
+    }
+    // npm exits 0 even when it silently dropped the package's platform
+    // optionalDependency — codex's shim lands while @openai/codex-win32-x64
+    // never does (#2064). A file in the bin dir is not proof, so the CLI has
+    // to answer `--version`; one reinstall is the documented workaround for
+    // the drop, and a CLI that still cannot run after it is reported broken
+    // instead of counting as a successful install.
+    if (!(await cliVersion(cliPath, env)).ok) {
+      const retry = await runNpm(args, env, prefix, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+      if (retry.code !== 0) {
+        throw new Error(`npm could not install ${pkg} on this server.${tail(retry.output)}`);
+      }
+      cliPath = installed();
+      const probe = cliPath
+        ? await cliVersion(cliPath, env)
+        : { ok: false, output: "" };
+      if (!probe.ok) {
+        throw new Error(cliPath
+          ? `${pkg} installed, but the \`${cli}\` it provided does not run — the install is incomplete.${tail(probe.output)}`
+          : `${pkg} installed, but it did not provide a \`${cli}\` command. Check the package name in this engine's install descriptor.`);
+      }
     }
   }
+}
+
+/** `<cli> --version` against the exact file the install left in the prefix —
+ * never a PATH sibling — reporting whether it ran and what it said. */
+function cliVersion(cliPath: string, env: NodeJS.ProcessEnv): Promise<{ ok: boolean; output: string }> {
+  return new Promise((resolve) => {
+    let child: ReturnType<typeof spawnCli>;
+    try {
+      child = spawnCli(cliPath, ["--version"], { env, stdio: ["pipe", "pipe", "pipe"] });
+    } catch (error) {
+      resolve({ ok: false, output: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    child.stdin.end();
+    let output = "";
+    const receive = (chunk: Buffer) => {
+      if (output.length < MAX_OUTPUT) output += chunk.toString("utf8").slice(0, MAX_OUTPUT - output.length);
+    };
+    child.stdout.on("data", receive);
+    child.stderr.on("data", receive);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      void killCliTree(child).finally(() => {
+        resolve({ ok: false, output: `${output}\n\`${cliPath} --version\` did not finish in ${VERSION_TIMEOUT_MS / 1000} seconds.` });
+      });
+    }, VERSION_TIMEOUT_MS);
+    timer.unref();
+    child.once("error", (error: NodeJS.ErrnoException) => {
+      if (timedOut) return; // A failed kill is not a failed launch report.
+      clearTimeout(timer);
+      resolve({ ok: false, output: error.message });
+    });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) return; // The whole group must stop, not just the root.
+      resolve({ ok: code === 0, output });
+    });
+  });
 }
 
 function tail(output: string): string {
