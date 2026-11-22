@@ -64,6 +64,14 @@ describe("decodeCodexSelection", () => {
   });
 });
 
+describe("STATIC_CODEX_MODELS", () => {
+  it("lists the GPT-6.2 Sol and Astra ids the installed Codex catalog reports", () => {
+    expect(STATIC_CODEX_MODELS.options.map((option) => option.id)).toEqual(
+      expect.arrayContaining(["gpt-6.2-sol", "gpt-6.2-astra"]),
+    );
+  });
+});
+
 describe("readCodexModelCatalog", () => {
   it("returns the static cloud fallback when there is no config or CLI probe", async () => {
     expect(await readCodexModelCatalog({ HOME: join(tmpdir(), "omb-codex-missing-home") })).toEqual(
